@@ -1,4 +1,3 @@
-import dataclasses
 import logging
 
 import einops
@@ -9,10 +8,10 @@ import jax.numpy as jnp
 from typing_extensions import override
 
 from openpi.models import model as _model
+from openpi.models import pi0_config
 import openpi.models.gemma as _gemma
 import openpi.models.siglip as _siglip
 from openpi.shared import array_typing as at
-import openpi.shared.nnx_utils as nnx_utils
 
 logger = logging.getLogger("openpi")
 
@@ -64,99 +63,8 @@ def posemb_sincos(
     return jnp.concatenate([jnp.sin(sinusoid_input), jnp.cos(sinusoid_input)], axis=-1)
 
 
-@dataclasses.dataclass(frozen=True)
-class Pi0Config(_model.BaseModelConfig):
-    dtype: str = "bfloat16"
-    paligemma_variant: _gemma.Variant = "gemma_2b"
-    action_expert_variant: _gemma.Variant = "gemma_300m"
-
-    # Set the model specific defaults.
-    action_dim: int = 32
-    action_horizon: int = 50
-    max_token_len: int = None  # type: ignore
-    # Pi05 has two differences from Pi0:
-    # - the state input is part of the discrete language tokens rather than a continuous input that is part of the suffix
-    # - the action expert uses adaRMSNorm to inject the flow matching timestep
-    pi05: bool = False
-    # This config option is not used directly by the model, but it is read by the ModelTransformFactory.
-    discrete_state_input: bool = None  # type: ignore
-
-    def __post_init__(self):
-        if self.max_token_len is None:
-            object.__setattr__(self, "max_token_len", 200 if self.pi05 else 48)
-        if self.discrete_state_input is None:
-            object.__setattr__(self, "discrete_state_input", self.pi05)
-
-    @property
-    @override
-    def model_type(self) -> _model.ModelType:
-        if self.pi05:
-            return _model.ModelType.PI05
-        return _model.ModelType.PI0
-
-    @override
-    def create(self, rng: at.KeyArrayLike) -> "Pi0":
-        return Pi0(self, rngs=nnx.Rngs(rng))
-
-    @override
-    def inputs_spec(self, *, batch_size: int = 1) -> tuple[_model.Observation, _model.Actions]:
-        image_spec = jax.ShapeDtypeStruct([batch_size, *_model.IMAGE_RESOLUTION, 3], jnp.float32)
-        image_mask_spec = jax.ShapeDtypeStruct([batch_size], jnp.bool_)
-
-        with at.disable_typechecking():
-            observation_spec = _model.Observation(
-                images={
-                    "base_0_rgb": image_spec,
-                    "left_wrist_0_rgb": image_spec,
-                    "right_wrist_0_rgb": image_spec,
-                },
-                image_masks={
-                    "base_0_rgb": image_mask_spec,
-                    "left_wrist_0_rgb": image_mask_spec,
-                    "right_wrist_0_rgb": image_mask_spec,
-                },
-                state=jax.ShapeDtypeStruct([batch_size, self.action_dim], jnp.float32),
-                tokenized_prompt=jax.ShapeDtypeStruct([batch_size, self.max_token_len], jnp.int32),
-                tokenized_prompt_mask=jax.ShapeDtypeStruct([batch_size, self.max_token_len], bool),
-            )
-        action_spec = jax.ShapeDtypeStruct([batch_size, self.action_horizon, self.action_dim], jnp.float32)
-
-        return observation_spec, action_spec
-
-    def get_freeze_filter(self) -> nnx.filterlib.Filter:
-        """Returns the freeze filter based on the model config."""
-        filters = []
-        has_lora = False
-        gemma_params_filter = nnx_utils.PathRegex(".*llm.*")
-        action_expert_params_filter = nnx_utils.PathRegex(".*llm.*_1.*")
-        if "lora" in self.paligemma_variant:
-            filters.append(
-                gemma_params_filter,
-            )
-            if "lora" not in self.action_expert_variant:
-                # If only freeze gemma params, exclude action expert params.
-                filters.append(
-                    nnx.Not(action_expert_params_filter),
-                )
-            has_lora = True
-        elif "lora" in self.action_expert_variant:
-            filters.append(
-                action_expert_params_filter,
-            )
-            has_lora = True
-
-        if has_lora:
-            # If any lora is used, exclude all lora params.
-            filters.append(
-                nnx.Not(nnx_utils.PathRegex(".*lora.*")),
-            )
-        if not filters:
-            return nnx.Nothing
-        return nnx.All(*filters)
-
-
 class Pi0(_model.BaseModel):
-    def __init__(self, config: Pi0Config, rngs: nnx.Rngs):
+    def __init__(self, config: pi0_config.Pi0Config, rngs: nnx.Rngs):
         super().__init__(config.action_dim, config.action_horizon, config.max_token_len)
         self.pi05 = config.pi05
         paligemma_config = _gemma.get_config(config.paligemma_variant)
@@ -202,7 +110,10 @@ class Pi0(_model.BaseModel):
         ar_mask = []
         tokens = []
         # embed images
+        
         for name in obs.images:
+            jax.debug.print(f"[JAX DEBUG] obs.images[name]: {obs.images[name]}")
+            jax.debug.print(f"[JAX DEBUG] abs mean of {name} image: {jnp.mean(jnp.abs(obs.images[name]))}")
             image_tokens, _ = self.PaliGemma.img(obs.images[name], train=False)
 
             tokens.append(image_tokens)
@@ -216,6 +127,11 @@ class Pi0(_model.BaseModel):
             # image tokens attend to each other
             ar_mask += [False] * image_tokens.shape[1]
 
+        # tokens = jnp.concatenate(tokens, axis=1)
+        # input_mask = jnp.concatenate(input_mask, axis=1)
+        # ar_mask = jnp.array(ar_mask)
+        # return tokens, input_mask, ar_mask
+
         # add language (aka tokenized inputs)
         if obs.tokenized_prompt is not None:
             tokenized_inputs = self.PaliGemma.llm(obs.tokenized_prompt, method="embed")
@@ -226,6 +142,26 @@ class Pi0(_model.BaseModel):
         tokens = jnp.concatenate(tokens, axis=1)
         input_mask = jnp.concatenate(input_mask, axis=1)
         ar_mask = jnp.array(ar_mask)
+
+
+        # Debug: embed_prefix outputs using jax.debug.print
+        jax.debug.print("[JAX DEBUG] embed_prefix outputs:")
+        jax.debug.print("  - tokens shape: {}", tokens.shape)
+        jax.debug.print("  - input_mask shape: {}", input_mask.shape)
+        jax.debug.print("  - ar_mask shape: {}", ar_mask.shape)
+        jax.debug.print("  - tokens stats: min={}, max={}, mean={}", jnp.min(tokens), jnp.max(tokens), jnp.mean(tokens))
+
+        # Print mean of tokens along sequence length dimension using jax.debug.print
+        # jax.debug.print("[JAX DEBUG] Mean tokens across sequence length:")
+        # import numpy as np
+        # np.set_printoptions(threshold=np.inf)
+        # jax.debug.print("  {}", jnp.mean(tokens, axis=1)[0, :])  # First batch
+        # np.set_printoptions(threshold=1000)
+        # Debug: Print first 5 elements of first batch's embeddings using jax.debug.print
+        jax.debug.print("[JAX DEBUG] First 5 elements of first batch's embeddings:")
+        jax.debug.print("  {}", tokens[0, 0:5, 0:5])
+        jax.debug.print("  {}", tokens[0, 769:775, 0:5])
+
         return tokens, input_mask, ar_mask
 
     @at.typecheck
@@ -312,25 +248,40 @@ class Pi0(_model.BaseModel):
         observation: _model.Observation,
         *,
         num_steps: int | at.Int[at.Array, ""] = 10,
+        noise: at.Float[at.Array, "b ah ad"] | None = None,
     ) -> _model.Actions:
+        #num_steps = 1
         observation = _model.preprocess_observation(None, observation, train=False)
+
         # note that we use the convention more common in diffusion literature, where t=1 is noise and t=0 is the target
         # distribution. yes, this is the opposite of the pi0 paper, and I'm sorry.
         dt = -1.0 / num_steps
         batch_size = observation.state.shape[0]
-        noise = jax.random.normal(rng, (batch_size, self.action_horizon, self.action_dim))
+        if noise is None:
+            noise = jax.random.normal(rng, (batch_size, self.action_horizon, self.action_dim))
 
         # first fill KV cache with a forward pass of the prefix
         prefix_tokens, prefix_mask, prefix_ar_mask = self.embed_prefix(observation)
+        #return prefix_tokens.astype(jnp.float32)
         prefix_attn_mask = make_attn_mask(prefix_mask, prefix_ar_mask)
         positions = jnp.cumsum(prefix_mask, axis=1) - 1
-        _, kv_cache = self.PaliGemma.llm([prefix_tokens, None], mask=prefix_attn_mask, positions=positions)
+        outputs_embeds, kv_cache = self.PaliGemma.llm([prefix_tokens, None], mask=prefix_attn_mask, positions=positions)
+        prefix_out = outputs_embeds[0]
+        jax.debug.print("[JAX DEBUG] prefix_out: {}", prefix_out.shape)
+        jax.debug.print("[JAX DEBUG] prefix_out stats: min={}, max={}, mean={}", 
+                        jnp.min(prefix_out), jnp.max(prefix_out), jnp.mean(prefix_out))
 
         def step(carry):
             x_t, time = carry
             suffix_tokens, suffix_mask, suffix_ar_mask, adarms_cond = self.embed_suffix(
                 observation, x_t, jnp.broadcast_to(time, batch_size)
             )
+
+            jax.debug.print("[JAX DEBUG] suffix_tokens shape: {}", suffix_tokens.shape)
+            jax.debug.print("[JAX DEBUG] suffix_tokens dtype: {}", suffix_tokens.dtype)
+            jax.debug.print("[JAX DEBUG] suffix_tokens stats: min={}, max={}, mean={}", 
+                            jnp.min(suffix_tokens), jnp.max(suffix_tokens), jnp.mean(suffix_tokens))
+
             # `suffix_attn_mask` is shape (b, suffix_len, suffix_len) indicating how the suffix tokens can attend to each
             # other
             suffix_attn_mask = make_attn_mask(suffix_mask, suffix_ar_mask)
@@ -355,8 +306,20 @@ class Pi0(_model.BaseModel):
                 kv_cache=kv_cache,
                 adarms_cond=[None, adarms_cond],
             )
+            jax.debug.print("[JAX DEBUG] suffix_out shape: {}", suffix_out.shape)
+            jax.debug.print("[JAX DEBUG] suffix_out stats: min={}, max={}, mean={}", 
+                            jnp.min(suffix_out), jnp.max(suffix_out), jnp.mean(suffix_out))
             assert prefix_out is None
             v_t = self.action_out_proj(suffix_out[:, -self.action_horizon :])
+            
+            # Debug: diffusion model output (print every step for now)
+            jax.debug.print("[JAX DEBUG] diffusion model output:")
+            jax.debug.print("  - suffix_out shape: {}", suffix_out.shape)
+            jax.debug.print("  - suffix_out stats: min={}, max={}, mean={}", 
+                            jnp.min(suffix_out), jnp.max(suffix_out), jnp.mean(suffix_out))
+            jax.debug.print("  - v_t (action output) shape: {}", v_t.shape)
+            jax.debug.print("  - v_t stats: min={}, max={}, mean={}", 
+                            jnp.min(v_t), jnp.max(v_t), jnp.mean(v_t))
 
             return x_t + dt * v_t, time + dt
 

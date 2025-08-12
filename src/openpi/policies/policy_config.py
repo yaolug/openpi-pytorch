@@ -12,6 +12,15 @@ from openpi.training import config as _config
 import openpi.transforms as transforms
 
 
+def get_policy_class(name: str):
+    """Get the policy's class and config class given a name (matching the policy class' `name` attribute)."""
+    if "pi0" in name:
+        from openpi.models_pytorch.pi0_pytorch import PI0Pytorch
+
+        return PI0Pytorch
+    raise ValueError(f"Unknown policy name: {name}")
+
+
 def create_trained_policy(
     train_config: _config.TrainConfig,
     checkpoint_dir: pathlib.Path | str,
@@ -20,6 +29,7 @@ def create_trained_policy(
     sample_kwargs: dict[str, Any] | None = None,
     default_prompt: str | None = None,
     norm_stats: dict[str, transforms.NormStats] | None = None,
+    is_pytorch: bool = False,
 ) -> _policy.Policy:
     """Create a policy from a trained checkpoint.
 
@@ -38,8 +48,35 @@ def create_trained_policy(
     checkpoint_dir = download.maybe_download(str(checkpoint_dir))
 
     logging.info("Loading model...")
-    model = train_config.model.load(_model.restore_params(checkpoint_dir / "params", dtype=jnp.bfloat16))
+    if is_pytorch:
+        print(f"train_config: {train_config}")
 
+        # Create a config object compatible with the PyTorch model
+
+        # Create the model with the config
+        model_class = get_policy_class(train_config.name)
+        model = model_class(config=train_config.model)
+
+        # Load weights if checkpoint exists
+        try:
+            import os
+
+            from safetensors.torch import load_file
+
+            # Try SafeTensors format first
+            weight_path = os.path.join(checkpoint_dir, "model.safetensors")
+            if os.path.exists(weight_path):
+                state_dict = load_file(weight_path)
+                model.load_state_dict(state_dict)
+                logging.info(
+                    f"Loaded PyTorch weights from {weight_path} (removed 'model.' prefix from {len([k for k in state_dict.keys() if k.startswith('model.')])} keys)"
+                )
+            else:
+                logging.warning(f"No PyTorch weights found at {weight_path}, using random initialization")
+        except Exception as e:
+            logging.warning(f"Failed to load PyTorch weights: {e}, using random initialization")
+    else:
+        model = train_config.model.load(_model.restore_params(checkpoint_dir / "params", dtype=jnp.bfloat16))
     data_config = train_config.data.create(train_config.assets_dirs, train_config.model)
     if norm_stats is None:
         # We are loading the norm stats from the checkpoint instead of the config assets dir to make sure
@@ -65,4 +102,6 @@ def create_trained_policy(
         ],
         sample_kwargs=sample_kwargs,
         metadata=train_config.policy_metadata,
+        is_pytorch=is_pytorch,
+        device="cuda" if is_pytorch else None,
     )
