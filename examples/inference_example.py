@@ -352,6 +352,8 @@ def main():
     # Reset random seed for fair comparison
     np.random.seed(42)
 
+    import torch
+    torch.cuda.empty_cache()
     # Run PyTorch inference with same noise as JAX
     pytorch_result = run_pytorch_inference_example(observation, args.model_name, noise, args.pytorch_checkpoint_dir)
 
