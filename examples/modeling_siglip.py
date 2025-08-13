@@ -271,19 +271,11 @@ class SiglipVisionEmbeddings(nn.Module):
     def forward(self, pixel_values: torch.FloatTensor, interpolate_pos_encoding=False) -> torch.Tensor:
         _, _, height, width = pixel_values.shape
 
-        print(f"[PyTorch DEBUG] patch_embedding.weight.dtype: {self.patch_embedding.weight.dtype}")
-        print(f"[PyTorch DEBUG] pixel_values.dtype: {pixel_values.dtype}")
-
         target_dtype = self.patch_embedding.weight.dtype  # shape = scalar
         self.patch_embedding = self.patch_embedding.to(dtype=torch.bfloat16).to(dtype=torch.float32)
 
         patch_embeds = self.patch_embedding(pixel_values.to(dtype=target_dtype))  # shape = [batch_size, embed_dim, grid_h, grid_w]
         embeddings = patch_embeds.flatten(2).transpose(1, 2)  # shape = [batch_size, num_patches, embed_dim]
-
-        print(f"[PyTorch DEBUG] mean(abs(patch_embedding.weight)): {torch.mean(torch.abs(self.patch_embedding.weight))}")
-        print(f"[PyTorch DEBUG] mean(abs(patch_embedding.bias)): {self.patch_embedding.bias}")
-
-        print(f"[PyTorch DEBUG] patch_embeds: {patch_embeds[0, 0:10, 0]}")
 
         if interpolate_pos_encoding:
             embeddings = embeddings + self.interpolate_pos_encoding(embeddings, height, width)
@@ -291,7 +283,6 @@ class SiglipVisionEmbeddings(nn.Module):
             self.position_embedding = self.position_embedding.to(dtype=torch.bfloat16).to(dtype=torch.float32)
             embeddings = embeddings + self.position_embedding(self.position_ids)
 
-        print(f"[PyTorch DEBUG] embeddings.dtype: {embeddings.dtype}")
         return embeddings
 
 
@@ -764,8 +755,6 @@ class SiglipVisionTransformer(nn.Module):
         super().__init__()
         self.config = config
         embed_dim = config.hidden_size
-
-        print(f"[PyTorch DEBUG] layer_norm_eps: {config.layer_norm_eps}")
 
         self.embeddings = SiglipVisionEmbeddings(config)
         self.encoder = SiglipEncoder(config)

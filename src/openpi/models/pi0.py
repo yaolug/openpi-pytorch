@@ -112,8 +112,6 @@ class Pi0(_model.BaseModel):
         # embed images
         
         for name in obs.images:
-            jax.debug.print(f"[JAX DEBUG] obs.images[name]: {obs.images[name]}")
-            jax.debug.print(f"[JAX DEBUG] abs mean of {name} image: {jnp.mean(jnp.abs(obs.images[name]))}")
             image_tokens, _ = self.PaliGemma.img(obs.images[name], train=False)
 
             tokens.append(image_tokens)
@@ -127,11 +125,6 @@ class Pi0(_model.BaseModel):
             # image tokens attend to each other
             ar_mask += [False] * image_tokens.shape[1]
 
-        # tokens = jnp.concatenate(tokens, axis=1)
-        # input_mask = jnp.concatenate(input_mask, axis=1)
-        # ar_mask = jnp.array(ar_mask)
-        # return tokens, input_mask, ar_mask
-
         # add language (aka tokenized inputs)
         if obs.tokenized_prompt is not None:
             tokenized_inputs = self.PaliGemma.llm(obs.tokenized_prompt, method="embed")
@@ -142,25 +135,6 @@ class Pi0(_model.BaseModel):
         tokens = jnp.concatenate(tokens, axis=1)
         input_mask = jnp.concatenate(input_mask, axis=1)
         ar_mask = jnp.array(ar_mask)
-
-
-        # Debug: embed_prefix outputs using jax.debug.print
-        jax.debug.print("[JAX DEBUG] embed_prefix outputs:")
-        jax.debug.print("  - tokens shape: {}", tokens.shape)
-        jax.debug.print("  - input_mask shape: {}", input_mask.shape)
-        jax.debug.print("  - ar_mask shape: {}", ar_mask.shape)
-        jax.debug.print("  - tokens stats: min={}, max={}, mean={}", jnp.min(tokens), jnp.max(tokens), jnp.mean(tokens))
-
-        # Print mean of tokens along sequence length dimension using jax.debug.print
-        # jax.debug.print("[JAX DEBUG] Mean tokens across sequence length:")
-        # import numpy as np
-        # np.set_printoptions(threshold=np.inf)
-        # jax.debug.print("  {}", jnp.mean(tokens, axis=1)[0, :])  # First batch
-        # np.set_printoptions(threshold=1000)
-        # Debug: Print first 5 elements of first batch's embeddings using jax.debug.print
-        jax.debug.print("[JAX DEBUG] First 5 elements of first batch's embeddings:")
-        jax.debug.print("  {}", tokens[0, 0:5, 0:5])
-        jax.debug.print("  {}", tokens[0, 769:775, 0:5])
 
         return tokens, input_mask, ar_mask
 
@@ -262,25 +236,15 @@ class Pi0(_model.BaseModel):
 
         # first fill KV cache with a forward pass of the prefix
         prefix_tokens, prefix_mask, prefix_ar_mask = self.embed_prefix(observation)
-        #return prefix_tokens.astype(jnp.float32)
         prefix_attn_mask = make_attn_mask(prefix_mask, prefix_ar_mask)
         positions = jnp.cumsum(prefix_mask, axis=1) - 1
-        outputs_embeds, kv_cache = self.PaliGemma.llm([prefix_tokens, None], mask=prefix_attn_mask, positions=positions)
-        prefix_out = outputs_embeds[0]
-        jax.debug.print("[JAX DEBUG] prefix_out: {}", prefix_out.shape)
-        jax.debug.print("[JAX DEBUG] prefix_out stats: min={}, max={}, mean={}", 
-                        jnp.min(prefix_out), jnp.max(prefix_out), jnp.mean(prefix_out))
+        _, kv_cache = self.PaliGemma.llm([prefix_tokens, None], mask=prefix_attn_mask, positions=positions)
 
         def step(carry):
             x_t, time = carry
             suffix_tokens, suffix_mask, suffix_ar_mask, adarms_cond = self.embed_suffix(
                 observation, x_t, jnp.broadcast_to(time, batch_size)
             )
-
-            jax.debug.print("[JAX DEBUG] suffix_tokens shape: {}", suffix_tokens.shape)
-            jax.debug.print("[JAX DEBUG] suffix_tokens dtype: {}", suffix_tokens.dtype)
-            jax.debug.print("[JAX DEBUG] suffix_tokens stats: min={}, max={}, mean={}", 
-                            jnp.min(suffix_tokens), jnp.max(suffix_tokens), jnp.mean(suffix_tokens))
 
             # `suffix_attn_mask` is shape (b, suffix_len, suffix_len) indicating how the suffix tokens can attend to each
             # other
@@ -306,20 +270,8 @@ class Pi0(_model.BaseModel):
                 kv_cache=kv_cache,
                 adarms_cond=[None, adarms_cond],
             )
-            jax.debug.print("[JAX DEBUG] suffix_out shape: {}", suffix_out.shape)
-            jax.debug.print("[JAX DEBUG] suffix_out stats: min={}, max={}, mean={}", 
-                            jnp.min(suffix_out), jnp.max(suffix_out), jnp.mean(suffix_out))
             assert prefix_out is None
             v_t = self.action_out_proj(suffix_out[:, -self.action_horizon :])
-            
-            # Debug: diffusion model output (print every step for now)
-            jax.debug.print("[JAX DEBUG] diffusion model output:")
-            jax.debug.print("  - suffix_out shape: {}", suffix_out.shape)
-            jax.debug.print("  - suffix_out stats: min={}, max={}, mean={}", 
-                            jnp.min(suffix_out), jnp.max(suffix_out), jnp.mean(suffix_out))
-            jax.debug.print("  - v_t (action output) shape: {}", v_t.shape)
-            jax.debug.print("  - v_t stats: min={}, max={}, mean={}", 
-                            jnp.min(v_t), jnp.max(v_t), jnp.mean(v_t))
 
             return x_t + dt * v_t, time + dt
 

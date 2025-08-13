@@ -172,8 +172,6 @@ class PaliGemmaWithExpertModel(nn.Module):
         adarms_cond: list[torch.Tensor] | None = None,
     ):
         if inputs_embeds[0] is not None:
-            print(f"[DEBUG] PaliGemma forward - inputs_embeds[0] shape: {inputs_embeds[0].shape}")
-            print(f"[DEBUG] PaliGemma forward - attention_mask shape: {attention_mask.shape if attention_mask is not None else 'None'}")
             prefix_output = self.paligemma.language_model.forward(
                 inputs_embeds=inputs_embeds[0],
                 attention_mask=attention_mask,
@@ -184,13 +182,11 @@ class PaliGemmaWithExpertModel(nn.Module):
             )
             prefix_past_key_values = prefix_output.past_key_values
             prefix_output = prefix_output.last_hidden_state
-            print(f"[DEBUG] PaliGemma forward - prefix_output shape: {prefix_output.shape}")
         else:
             prefix_output = None
             prefix_past_key_values = None
 
         if inputs_embeds[1] is not None:
-            print(f"[DEBUG] Gemma expert forward - inputs_embeds[1] shape: {inputs_embeds[1].shape}")
             suffix_output = self.gemma_expert.model.forward(
                 inputs_embeds=inputs_embeds[1],
                 attention_mask=attention_mask,
@@ -200,7 +196,6 @@ class PaliGemmaWithExpertModel(nn.Module):
                 adarms_cond=adarms_cond[1] if adarms_cond is not None else None,
             )
             suffix_output = suffix_output.last_hidden_state
-            print(f"[DEBUG] Gemma expert forward - suffix_output shape: {suffix_output.shape}")
         else:
             suffix_output = None
 

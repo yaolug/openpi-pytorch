@@ -149,26 +149,12 @@ class PI0Pytorch(nn.Module):
         embs = []
         pad_masks = []
         att_masks = []
-
-        # Debug: Print PyTorch SigLIP model config and weights
-        print(f"[PyTorch DEBUG] SigLIP Model Info:")
-        vision_model = self.paligemma_with_expert.paligemma.vision_tower
-        print(f"  - Vision model type: {type(vision_model)}")
-        print(f"  - Vision model config: {vision_model.config}")
-        
-        # Print some key weights
-        print(f"  - Vision model weights:")
-        for name, param in vision_model.named_parameters():
-            if "embed" in name or "patch" in name or "conv" in name:
-                print(f"    {name}: {param.shape}, mean={param.mean():.6f}, std={param.std():.6f}")
-                break  # Just print first few
         
         # TODO: remove for loop
         for (
             img,
             img_mask,
         ) in zip(images, img_masks):
-            print(f"[PyTorch DEBUG] abs mean of image: {torch.mean(torch.abs(img))}")
             img_emb = self.paligemma_with_expert.embed_image(img)
             img_emb = img_emb.to(dtype=torch.bfloat16)
 
@@ -208,23 +194,6 @@ class PI0Pytorch(nn.Module):
         bsize = pad_masks.shape[0]
 
         att_masks = att_masks[None, :].expand(bsize, len(att_masks))
-
-        # Debug: embed_prefix outputs
-        print(f"[PyTorch DEBUG] embed_prefix outputs:")
-        print(f"  - embs shape: {embs.shape}")
-        print(f"  - pad_masks shape: {pad_masks.shape}")
-        print(f"  - att_masks shape: {att_masks.shape}")
-        print(f"  - embs stats: min={embs.min():.6f}, max={embs.max():.6f}, mean={embs.mean():.6f}")
-
-        # Print mean of embeddings along sequence length dimension (dim=1)
-        # print(f"[PyTorch DEBUG] Mean embeddings across sequence length:")
-        # torch.set_printoptions(threshold=float('inf'))
-        # print(f"  {embs.mean(dim=1)[0, :]}")  # First 5 elements of first batch
-        # torch.set_printoptions(threshold=10)
-        # Debug: Print first 5 elements of first batch's embeddings
-        print(f"[PyTorch DEBUG] First 5 elements of first batch's embeddings:")
-        print(f"  {embs[0, 0:5, 0:5]}")
-        print(f"  {embs[0, 769:775, 0:5]}")
 
         return embs, pad_masks, att_masks
 
@@ -423,22 +392,13 @@ class PI0Pytorch(nn.Module):
         prefix_att_2d_masks_4d = torch.where(prefix_att_2d_masks_4d, 0.0, -2.3819763e38)
         self.paligemma_with_expert.paligemma.language_model.config._attn_implementation = "eager"
 
-        output, past_key_values = self.paligemma_with_expert.forward(
+        _, past_key_values = self.paligemma_with_expert.forward(
             attention_mask=prefix_att_2d_masks_4d,
             position_ids=prefix_position_ids,
             past_key_values=None,
             inputs_embeds=[prefix_embs, None],
             use_cache=True,
         )
-        print(f"[PyTorch DEBUG] output shape: {output[0].shape}")
-        print(f"[PyTorch DEBUG] output stats: min={output[0].min():.6f}, max={output[0].max():.6f}, mean={output[0].mean():.6f}")
-        # Print mean of output along sequence length dimension
-        # if output[0] is not None:
-        #     seq_mean = torch.mean(output[0], dim=1)  # Average across sequence length dimension
-        #     print(f"[PyTorch DEBUG] Mean across sequence length (first batch):")
-        #     torch.set_printoptions(threshold=float('inf'))
-        #     print(f"  {seq_mean[0, :]}")  # Print first 5 elements of first batch
-        #     torch.set_printoptions(threshold=30)
 
         dt = -1.0 / num_steps
         model_device = next(self.paligemma_with_expert.parameters()).device
@@ -472,10 +432,6 @@ class PI0Pytorch(nn.Module):
         """Apply one denoising step of the noise `x_t` at a given timestep."""
         suffix_embs, suffix_pad_masks, suffix_att_masks, adarms_cond = self.embed_suffix(state, x_t, timestep)
 
-        print(f"[PyTorch DEBUG] suffix_embs shape: {suffix_embs.shape}")
-        print(f"[PyTorch DEBUG] suffix_embs dtype: {suffix_embs.dtype}")
-        print(f"[PyTorch DEBUG] suffix_embs stats: min={suffix_embs.min():.6f}, max={suffix_embs.max():.6f}, mean={suffix_embs.mean():.6f}")
-
         suffix_len = suffix_pad_masks.shape[1]
         batch_size = prefix_pad_masks.shape[0]
         prefix_len = prefix_pad_masks.shape[1]
@@ -485,36 +441,6 @@ class PI0Pytorch(nn.Module):
         suffix_att_2d_masks = make_att_2d_masks(suffix_pad_masks, suffix_att_masks)
 
         full_att_2d_masks = torch.cat([prefix_pad_2d_masks, suffix_att_2d_masks], dim=2)
-        print(f"[PyTorch DEBUG] full_att_2d_masks shape: {full_att_2d_masks.shape}")
-        print(f"[PyTorch DEBUG] past_key_values[0][0].shape: {past_key_values[0][0].shape}")
-        print(f"[PyTorch DEBUG] suffix_len: {suffix_len}")
-        print(f"[PyTorch DEBUG] prefix_len: {prefix_len}")
-        print(f"[PyTorch DEBUG] batch_size: {batch_size}")
-
-        # # When using past_key_values, we need to account for the full sequence length
-        # # The transformer expects attention mask to cover: past_key_values + new suffix tokens
-        # # Adjust the attention mask to match the expected sequence length
-        # if past_key_values is not None:
-        #     # Get the actual key length from past_key_values
-        #     # past_key_values is [prefix_past_key_values, suffix_past_key_values]
-        #     # We want the prefix past_key_values: past_key_values[0]
-        #     # Then access layer 0, keys tensor: past_key_values[0][0][0]
-        #     # Format: [prefix/suffix][layer][key/value][batch, heads, seq_len, head_dim]
-        #     if past_key_values[0] is not None and len(past_key_values[0]) > 0:
-        #         past_seq_len = past_key_values[0][0][0].shape[2]
-        #     else:
-        #         # Fallback: if prefix is None, try suffix
-        #         past_seq_len = past_key_values[1][0][0].shape[2] if past_key_values[1] is not None else 0
-        #     current_seq_len = full_att_2d_masks.shape[2]
-        #     expected_seq_len = past_seq_len + suffix_len
-
-        #     if current_seq_len != expected_seq_len:
-        #         # Pad the attention mask to match expected length
-        #         pad_size = expected_seq_len - current_seq_len
-        #         padding = torch.ones(
-        #             batch_size, suffix_len, pad_size, dtype=full_att_2d_masks.dtype, device=full_att_2d_masks.device
-        #         )
-        #         full_att_2d_masks = torch.cat([full_att_2d_masks, padding], dim=2)
 
         prefix_offsets = torch.sum(prefix_pad_masks, dim=-1)[:, None]
         position_ids = prefix_offsets + torch.cumsum(suffix_pad_masks, dim=1) - 1
@@ -533,18 +459,9 @@ class PI0Pytorch(nn.Module):
             adarms_cond=[None, adarms_cond]
         )
 
-        print(f"[PyTorch DEBUG] outputs_embeds shape: {outputs_embeds[1].shape}")
-        print(f"[PyTorch DEBUG] outputs_embeds stats: min={outputs_embeds[1].min():.6f}, max={outputs_embeds[1].max():.6f}, mean={outputs_embeds[1].mean():.6f}")
         suffix_out = outputs_embeds[1]
         suffix_out = suffix_out[:, -self.config.action_horizon :]
         suffix_out = suffix_out.to(dtype=torch.float32)
         v_t = self.action_out_proj(suffix_out)
-        
-        # Debug: diffusion model output
-        print(f"[PyTorch DEBUG] diffusion model output:")
-        print(f"  - suffix_out shape: {suffix_out.shape}")
-        print(f"  - suffix_out stats: min={suffix_out.min():.6f}, max={suffix_out.max():.6f}, mean={suffix_out.mean():.6f}")
-        print(f"  - v_t (action output) shape: {v_t.shape}")
-        print(f"  - v_t stats: min={v_t.min():.6f}, max={v_t.max():.6f}, mean={v_t.mean():.6f}")
-        
+
         return v_t
