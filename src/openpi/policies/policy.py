@@ -55,10 +55,16 @@ class Policy(BasePolicy):
         # Make a copy since transformations may modify the inputs in place.
         inputs = jax.tree.map(lambda x: x, obs)
         inputs = self._input_transform(inputs)
-        # Make a batch and convert to jax.Array.
-        inputs = jax.tree.map(lambda x: jnp.asarray(x)[np.newaxis, ...], inputs)
+        if self._is_pytorch_model:
+            # Convert inputs to PyTorch tensors and move to correct device
+            inputs = jax.tree.map(lambda x: torch.from_numpy(np.array(x)).to(self._device)[None, ...], inputs)
 
-        if not self._is_pytorch_model:
+            for key in inputs['image']:
+                inputs['image'][key] = inputs['image'][key].to(dtype=torch.float32).permute(0, 3, 1, 2) / 255.0 * 2.0 - 1.0
+        else:
+            self._rng, sample_rng = jax.random.split(self._rng)
+            # Make a batch and convert to jax.Array.
+            inputs = jax.tree.map(lambda x: jnp.asarray(x)[np.newaxis, ...], inputs)
             self._rng, sample_rng = jax.random.split(self._rng)
         # Prepare kwargs for sample_actions
         sample_kwargs = dict(self._sample_kwargs)

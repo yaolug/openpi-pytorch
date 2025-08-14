@@ -118,6 +118,8 @@ class PI0Pytorch(nn.Module):
             self.action_time_mlp_in = nn.Linear(2 * action_expert_config.width, action_expert_config.width)
             self.action_time_mlp_out = nn.Linear(action_expert_config.width, action_expert_config.width)
 
+        self.sample_actions = torch.compile(self.sample_actions, mode="reduce-overhead")
+
     #     self.set_requires_grad()
 
     # def set_requires_grad(self):
@@ -316,73 +318,20 @@ class PI0Pytorch(nn.Module):
 
     @torch.no_grad()
     def sample_actions(self, observation, noise=None, num_steps=10) -> Tensor:
-        #num_steps = 1
-
-        # for key in observation:
-        #     if isinstance(observation[key], torch.Tensor) and observation[key].dtype == torch.float32:
-        #         observation[key] = observation[key].to(dtype=torch.bfloat16)
-
         """Do a full inference forward and compute the action (batch_size x num_steps x num_motors)"""
         bsize = observation['state'].shape[0]
         device = next(self.paligemma_with_expert.parameters()).device
         if noise is None:
             actions_shape = (bsize, self.config.action_horizon, self.config.action_dim)
             noise = self.sample_noise(actions_shape, device)
-
-        # TODO preprocess_observation
-        # Observation(
-        #     images=out_images,
-        #     image_masks=out_masks,
-        #     state=observation.state,
-        #     tokenized_prompt=observation.tokenized_prompt,
-        #     tokenized_prompt_mask=observation.tokenized_prompt_mask,
-        #     token_ar_mask=observation.token_ar_mask,
-        #     token_loss_mask=observation.token_loss_mask,
-        # )
-
-        for key in observation['image']:
-            import numpy as np
-            if observation["image"][key].dtype == np.uint8:
-                observation["image"][key] = observation["image"][key].astype(np.float32) / 255.0 * 2.0 - 1.0
-
-        # TODO: Move this after input_transform
-        images = []
-        for img in observation['image'].values():
-            img_tensor = torch.from_numpy(np.array(img))
-            
-            # Handle different input formats
-            if img_tensor.dim() == 4:  # (batch, H, W, C) -> (batch, C, H, W)
-                img_tensor = img_tensor.permute(0, 3, 1, 2)
-            elif img_tensor.dim() == 3:  # (H, W, C) -> (C, H, W) -> (1, C, H, W)
-                img_tensor = img_tensor.permute(2, 0, 1)  # -> (C, H, W)
-                img_tensor = img_tensor.unsqueeze(0)  # -> (1, C, H, W)
-            
-            # Ensure correct device and dtype
-            img_tensor = img_tensor.to(device=next(self.paligemma_with_expert.parameters()).device, 
-                                     dtype=torch.float32)
-            images.append(img_tensor)
         
-        img_masks = []
-        for mask in observation['image_mask'].values():
-            mask_tensor = torch.from_numpy(np.array(mask))
-            # Ensure mask has batch dimension
-            if mask_tensor.dim() == 0:
-                mask_tensor = mask_tensor.unsqueeze(0)
-            mask_tensor = mask_tensor.to(device=next(self.paligemma_with_expert.parameters()).device)
-            img_masks.append(mask_tensor)
-        
-        lang_tokens = torch.from_numpy(np.array(observation['tokenized_prompt']))
-        lang_masks = torch.from_numpy(np.array(observation['tokenized_prompt_mask']))
-        state = torch.from_numpy(np.array(observation['state']))
-        
-        # Move language tokens and state to correct device
-        lang_tokens = lang_tokens.to(device=next(self.paligemma_with_expert.parameters()).device)
-        lang_masks = lang_masks.to(device=next(self.paligemma_with_expert.parameters()).device)
-        state = state.to(device=next(self.paligemma_with_expert.parameters()).device)
+        images = list(observation['image'].values())
+        img_masks = list(observation['image_mask'].values())
+        lang_tokens = observation['tokenized_prompt']
+        lang_masks = observation['tokenized_prompt_mask']
+        state = observation['state']
 
-        #print(f"[PyTorch DEBUG] images: {images}")
         prefix_embs, prefix_pad_masks, prefix_att_masks = self.embed_prefix(images, img_masks, lang_tokens, lang_masks)
-        #return prefix_embs.to(torch.float32)
         prefix_att_2d_masks = make_att_2d_masks(prefix_pad_masks, prefix_att_masks)
         prefix_position_ids = torch.cumsum(prefix_pad_masks, dim=1) - 1
 

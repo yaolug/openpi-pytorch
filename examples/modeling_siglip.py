@@ -272,7 +272,7 @@ class SiglipVisionEmbeddings(nn.Module):
         _, _, height, width = pixel_values.shape
 
         target_dtype = self.patch_embedding.weight.dtype  # shape = scalar
-        self.patch_embedding = self.patch_embedding.to(dtype=torch.bfloat16).to(dtype=torch.float32)
+        #self.patch_embedding = self.patch_embedding.to(dtype=torch.bfloat16).to(dtype=torch.float32)
 
         patch_embeds = self.patch_embedding(pixel_values.to(dtype=target_dtype))  # shape = [batch_size, embed_dim, grid_h, grid_w]
         embeddings = patch_embeds.flatten(2).transpose(1, 2)  # shape = [batch_size, num_patches, embed_dim]
@@ -280,7 +280,7 @@ class SiglipVisionEmbeddings(nn.Module):
         if interpolate_pos_encoding:
             embeddings = embeddings + self.interpolate_pos_encoding(embeddings, height, width)
         else:
-            self.position_embedding = self.position_embedding.to(dtype=torch.bfloat16).to(dtype=torch.float32)
+            #self.position_embedding = self.position_embedding.to(dtype=torch.bfloat16).to(dtype=torch.float32)
             embeddings = embeddings + self.position_embedding(self.position_ids)
 
         return embeddings

@@ -716,7 +716,7 @@ def convert_pi0_checkpoint(checkpoint_dir: str, precision: str, output_path: str
         print(f"  ⚠️ Warning: Could not load all parameters: {e}")
         print(f"  Continuing with partial load...")
     
-    pi0_model = pi0_model.to(torch_dtype)
+    pi0_model = pi0_model.to(torch.bfloat16)
 
     # Save the converted model using safetensors
     print(f"\n💾 Saving converted model to {output_path}...")
