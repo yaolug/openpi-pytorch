@@ -70,8 +70,8 @@ DEFAULT_CHECKPOINT: dict[EnvMode, Checkpoint] = {
         dir="gs://openpi-assets/checkpoints/pi0_fast_droid",
     ),
     EnvMode.LIBERO: Checkpoint(
-        config="pi05_libero",
-        dir="/home/jasonlu/.cache/openpi/openpi-assets-preview/checkpoints/pi05_libero",
+        config="pi0_fast_libero",
+        dir="gs://openpi-assets/checkpoints/pi0_fast_libero",
     ),
 }
 

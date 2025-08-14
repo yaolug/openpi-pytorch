@@ -15,6 +15,25 @@ python inference_example.py --model_name pi05_droid --jax_checkpoint_dir /home/j
 
 """
 
+import os
+os.environ['TORCH_COMPILE_DEBUG'] = '0'
+os.environ.pop("TORCH_LOGS", None)
+os.environ.pop("TORCH_COMPILE_DEBUG", None)
+os.environ.pop("TORCHDYNAMO_VERBOSE", None)
+os.environ.pop("TRITON_DEBUG", None)
+import logging
+logging.getLogger("torch._dynamo").setLevel(logging.WARNING)
+logging.getLogger("torch._inductor").setLevel(logging.WARNING)
+import torch
+torch._inductor.config.debug = False
+torch._inductor.config.verbose_progress = False
+
+# also make sure the older config flags aren’t printing
+import torch._dynamo.config as dcfg
+dcfg.verbose = False
+
+
+
 import argparse
 import numpy as np
 import jax
@@ -198,10 +217,10 @@ def run_pytorch_inference_example(observation, model_name, noise, checkpoint_dir
         config = _config.get_config(model_name)
 
         # Create trained policy
-        policy = _policy_config.create_trained_policy(config, checkpoint_dir, is_pytorch=True)
+        policy = _policy_config.create_trained_policy(config, checkpoint_dir)
 
         # Print all PyTorch weights
-        _print_pytorch_model_weights(policy)
+        # _print_pytorch_model_weights(policy)
 
         # Run inference
         print("Running PyTorch inference...")
@@ -348,9 +367,6 @@ def main():
     jax_jitted_result, jax_nojit_result, noise, jitted_time, nojit_time = run_jax_inference_compare_jit(
         observation, args.model_name, args.jax_checkpoint_dir
     )
-
-    # Reset random seed for fair comparison
-    np.random.seed(42)
 
     import torch
     torch.cuda.empty_cache()

@@ -1,7 +1,7 @@
 import contextlib
 import functools as ft
 import inspect
-from typing import TypeAlias, TypeVar, cast
+from typing import TypeAlias, TypeVar, cast, Union
 
 import beartype
 import jax
@@ -21,6 +21,7 @@ from jaxtyping import UInt8  # noqa: F401
 from jaxtyping import config
 from jaxtyping import jaxtyped
 import jaxtyping._decorator
+import torch
 
 # patch jaxtyping to handle https://github.com/patrick-kidger/jaxtyping/issues/277.
 # the problem is that custom PyTree nodes are sometimes initialized with arbitrary types (e.g., `jax.ShapeDtypeStruct`,
@@ -40,15 +41,50 @@ def _check_dataclass_annotations(self, typechecker):
 
 jaxtyping._decorator._check_dataclass_annotations = _check_dataclass_annotations  # noqa: SLF001
 
+TorchTensor = torch.Tensor
+TorchFloat = torch.Tensor  # For float tensors
+TorchInt = torch.Tensor    # For int tensors
+TorchBool = torch.Tensor   # For bool tensors
+TorchUInt8 = torch.Tensor  # For uint8 tensors
+
+# Union type for arrays that can be either JAX arrays or torch tensors
+ArrayOrTorch = Union[Array, TorchTensor]
+
+# Custom type annotations that work with both JAX and torch
+def FloatOrTorch(shape: str = "...") -> type:
+    """Type annotation for float arrays that can be JAX arrays or torch tensors."""
+    return Union[Float[Array, shape], TorchFloat]
+
+def IntOrTorch(shape: str = "...") -> type:
+    """Type annotation for int arrays that can be JAX arrays or torch tensors."""
+    return Union[Int[Array, shape], TorchInt]
+
+def BoolOrTorch(shape: str = "...") -> type:
+    """Type annotation for bool arrays that can be JAX arrays or torch tensors."""
+    return Union[Bool[Array, shape], TorchBool]
+
+def UInt8OrTorch(shape: str = "...") -> type:
+    """Type annotation for uint8 arrays that can be JAX arrays or torch tensors."""
+    return Union[UInt8[Array, shape], TorchUInt8]
+
 KeyArrayLike: TypeAlias = jax.typing.ArrayLike
 Params: TypeAlias = PyTree[Float[ArrayLike, "..."]]
 
 T = TypeVar("T")
 
 
+# Custom type checker that handles both JAX arrays and torch tensors
+def _torch_aware_typechecker(func):
+    """Type checker that can handle both JAX arrays and torch tensors."""
+    @ft.wraps(func)
+    def wrapper(*args, **kwargs):
+        # Use beartype for basic type checking
+        return beartype.beartype(func)(*args, **kwargs)
+    return wrapper
+
 # runtime type-checking decorator
 def typecheck(t: T) -> T:
-    return cast(T, ft.partial(jaxtyped, typechecker=beartype.beartype)(t))
+    return cast(T, ft.partial(jaxtyped, typechecker=_torch_aware_typechecker)(t))
 
 
 @contextlib.contextmanager

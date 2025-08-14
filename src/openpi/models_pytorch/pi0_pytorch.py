@@ -4,7 +4,6 @@ import torch
 from torch import Tensor
 from torch import nn
 import torch.nn.functional as F
-from transformers import PreTrainedModel
 
 import openpi.models.gemma as _gemma
 from openpi.models_pytorch.gemma_pytorch import PaliGemmaWithExpertModel
@@ -82,31 +81,16 @@ def make_att_2d_masks(pad_masks, att_masks):
 
 
 class PI0Pytorch(nn.Module):
-    """
-    π0: A Vision-Language-Action Flow Model for General Robot Control
-
-    [Paper](https://www.physicalintelligence.company/download/pi0.pdf)
-    [Jax code](https://github.com/Physical-Intelligence/openpi)
-
-    Designed by Physical Intelligence. Ported from Jax to Pytorch.
-    """
-
     def __init__(self, config):
         super().__init__()
         self.config = config
         self.pi05 = config.pi05
 
-        # paligemma_with_export_config = PaliGemmaWithExpertConfig(
-        #     freeze_vision_encoder=self.config.freeze_vision_encoder,
-        #     train_expert_only=self.config.train_expert_only,
-        #     attention_implementation=self.config.attention_implementation,
-        # )
         paligemma_config = _gemma.get_config(config.paligemma_variant)
         action_expert_config = _gemma.get_config(config.action_expert_variant)
 
         self.paligemma_with_expert = PaliGemmaWithExpertModel(paligemma_config, action_expert_config, use_adarms=[False, True] if self.pi05 else [False, False])
 
-        # Projections are float32
         self.action_in_proj = nn.Linear(32, action_expert_config.width)
         self.action_out_proj = nn.Linear(action_expert_config.width, 32)
 
@@ -119,12 +103,6 @@ class PI0Pytorch(nn.Module):
             self.action_time_mlp_out = nn.Linear(action_expert_config.width, action_expert_config.width)
 
         self.sample_actions = torch.compile(self.sample_actions, mode="reduce-overhead")
-
-    #     self.set_requires_grad()
-
-    # def set_requires_grad(self):
-    #     for params in self.state_proj.parameters():
-    #         params.requires_grad = self.config.train_state_proj
 
     def sample_noise(self, shape, device):
         noise = torch.normal(
@@ -147,22 +125,15 @@ class PI0Pytorch(nn.Module):
         """Embed images with SigLIP and language tokens with embedding layer to prepare
         for PaliGemma transformer processing.
         """
-        # TODO: avoid list in python and torch.cat ; prefer pre-allocation with torch.empty
         embs = []
         pad_masks = []
         att_masks = []
         
-        # TODO: remove for loop
         for (
             img,
             img_mask,
         ) in zip(images, img_masks):
             img_emb = self.paligemma_with_expert.embed_image(img)
-            img_emb = img_emb.to(dtype=torch.bfloat16)
-
-            # # TODO: why we need to do this?
-            # img_emb_dim = img_emb.shape[-1]
-            # img_emb = img_emb * torch.tensor(img_emb_dim**0.5, dtype=img_emb.dtype, device=img_emb.device)
 
             bsize, num_img_embs = img_emb.shape[:2]
             img_mask = img_mask[:, None].expand(bsize, num_img_embs)
@@ -172,9 +143,6 @@ class PI0Pytorch(nn.Module):
 
             # Create attention masks so that image tokens attend to each other
             att_masks += [0] * num_img_embs
-
-        # embs = torch.cat(embs, dim=1)
-        # return embs, pad_masks, att_masks
 
         lang_emb = self.paligemma_with_expert.embed_language_tokens(lang_tokens)
 
@@ -207,10 +175,7 @@ class PI0Pytorch(nn.Module):
 
         if not self.pi05:
             # Embed state
-            # self.state_proj = self.state_proj.to(dtype=torch.bfloat16).to(dtype=torch.float32)
-
             state_emb = self.state_proj(state)
-            state_emb = state_emb.to(dtype=torch.bfloat16)
             embs.append(state_emb[:, None, :])
             bsize = state_emb.shape[0]
             dtype = state_emb.dtype
@@ -229,23 +194,14 @@ class PI0Pytorch(nn.Module):
         time_emb = time_emb.type(dtype=timestep.dtype)
 
         # Fuse timestep + action information using an MLP
-        # self.action_in_proj = self.action_in_proj.to(dtype=torch.bfloat16).to(dtype=torch.float32)
         action_emb = self.action_in_proj(noisy_actions)
 
         if not self.pi05:
-            # self.action_time_mlp_in = self.action_time_mlp_in.to(dtype=torch.bfloat16).to(dtype=torch.float32)
-            # self.action_time_mlp_out = self.action_time_mlp_out.to(dtype=torch.bfloat16).to(dtype=torch.float32)
-
             time_emb = time_emb[:, None, :].expand_as(action_emb)
-
             action_time_emb = torch.cat([action_emb, time_emb], dim=2)
-
             action_time_emb = self.action_time_mlp_in(action_time_emb)
             action_time_emb = F.silu(action_time_emb)  # swish == silu
             action_time_emb = self.action_time_mlp_out(action_time_emb)
-
-            # Convert to bfloat16 to match state embeddings
-            action_time_emb = action_time_emb.to(dtype=torch.bfloat16)
             adarms_cond = None
         else:
             # time MLP (for adaRMS)
@@ -307,29 +263,26 @@ class PI0Pytorch(nn.Module):
             adarms_cond=[None, adarms_cond]
         )
         suffix_out = suffix_out[:, -self.config.action_horizon :]
-        # Original openpi code, upcast attention output
         suffix_out = suffix_out.to(dtype=torch.float32)
 
-        # self.action_out_proj = self.action_out_proj.to(dtype=torch.bfloat16).to(dtype=torch.float32)
         v_t = self.action_out_proj(suffix_out)
 
         losses = F.mse_loss(u_t, v_t, reduction="none")
         return losses
 
     @torch.no_grad()
-    def sample_actions(self, observation, noise=None, num_steps=10) -> Tensor:
+    def sample_actions(self, device, observation, noise=None, num_steps=10) -> Tensor:
         """Do a full inference forward and compute the action (batch_size x num_steps x num_motors)"""
-        bsize = observation['state'].shape[0]
-        device = next(self.paligemma_with_expert.parameters()).device
+        bsize = observation.state.shape[0]
         if noise is None:
             actions_shape = (bsize, self.config.action_horizon, self.config.action_dim)
             noise = self.sample_noise(actions_shape, device)
         
-        images = list(observation['image'].values())
-        img_masks = list(observation['image_mask'].values())
-        lang_tokens = observation['tokenized_prompt']
-        lang_masks = observation['tokenized_prompt_mask']
-        state = observation['state']
+        images = list(observation.images.values())
+        img_masks = list(observation.image_masks.values())
+        lang_tokens = observation.tokenized_prompt
+        lang_masks = observation.tokenized_prompt_mask
+        state = observation.state
 
         prefix_embs, prefix_pad_masks, prefix_att_masks = self.embed_prefix(images, img_masks, lang_tokens, lang_masks)
         prefix_att_2d_masks = make_att_2d_masks(prefix_pad_masks, prefix_att_masks)
@@ -350,11 +303,10 @@ class PI0Pytorch(nn.Module):
         )
 
         dt = -1.0 / num_steps
-        model_device = next(self.paligemma_with_expert.parameters()).device
-        dt = torch.tensor(dt, dtype=torch.float32, device=model_device)
+        dt = torch.tensor(dt, dtype=torch.float32, device=device)
 
         x_t = noise
-        time = torch.tensor(1.0, dtype=torch.float32, device=model_device)
+        time = torch.tensor(1.0, dtype=torch.float32, device=device)
         while time >= -dt / 2:
             expanded_time = time.expand(bsize)
             v_t = self.denoise_step(

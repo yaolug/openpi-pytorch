@@ -29,7 +29,6 @@ def create_trained_policy(
     sample_kwargs: dict[str, Any] | None = None,
     default_prompt: str | None = None,
     norm_stats: dict[str, transforms.NormStats] | None = None,
-    is_pytorch: bool = False,
 ) -> _policy.Policy:
     """Create a policy from a trained checkpoint.
 
@@ -43,9 +42,18 @@ def create_trained_policy(
             data if it doesn't already exist.
         norm_stats: The norm stats to use for the policy. If not provided, the norm stats will be loaded
             from the checkpoint directory.
+            
+    Note:
+        The function automatically detects whether the model is PyTorch-based by checking for the
+        presence of "model.safetensors" in the checkpoint directory.
     """
     repack_transforms = repack_transforms or transforms.Group()
     checkpoint_dir = download.maybe_download(str(checkpoint_dir))
+
+    # Check if this is a PyTorch model by looking for model.safetensors
+    import os
+    weight_path = os.path.join(checkpoint_dir, "model.safetensors")
+    is_pytorch = os.path.exists(weight_path)
 
     logging.info("Loading model...")
     if is_pytorch:
@@ -59,12 +67,9 @@ def create_trained_policy(
 
         # Load weights if checkpoint exists
         try:
-            import os
-
             from safetensors.torch import load_file
 
             # Try SafeTensors format first
-            weight_path = os.path.join(checkpoint_dir, "model.safetensors")
             if os.path.exists(weight_path):
                 state_dict = load_file(weight_path)
                 model.load_state_dict(state_dict)

@@ -59,13 +59,15 @@ class Policy(BasePolicy):
             # Convert inputs to PyTorch tensors and move to correct device
             inputs = jax.tree.map(lambda x: torch.from_numpy(np.array(x)).to(self._device)[None, ...], inputs)
 
-            for key in inputs['image']:
-                inputs['image'][key] = inputs['image'][key].to(dtype=torch.float32).permute(0, 3, 1, 2) / 255.0 * 2.0 - 1.0
+            # for key in inputs['image']:
+            #     inputs['image'][key] = inputs['image'][key].to(dtype=torch.float32).permute(0, 3, 1, 2) / 255.0 * 2.0 - 1.0
+
+            sample_rng_or_device = self._device
         else:
-            self._rng, sample_rng = jax.random.split(self._rng)
+            self._rng, sample_rng_or_device = jax.random.split(self._rng)
             # Make a batch and convert to jax.Array.
             inputs = jax.tree.map(lambda x: jnp.asarray(x)[np.newaxis, ...], inputs)
-            self._rng, sample_rng = jax.random.split(self._rng)
+            self._rng, sample_rng_or_device = jax.random.split(self._rng)
         # Prepare kwargs for sample_actions
         sample_kwargs = dict(self._sample_kwargs)
         if noise is not None:
@@ -80,9 +82,7 @@ class Policy(BasePolicy):
             sample_kwargs["noise"] = noise
 
         actions = (
-            self._sample_actions(sample_rng, _model.Observation.from_dict(inputs), **sample_kwargs)
-            if not self._is_pytorch_model
-            else self._sample_actions(inputs, **sample_kwargs)
+            self._sample_actions(sample_rng_or_device, _model.Observation.from_dict(inputs), **sample_kwargs)
         )
         outputs = {"state": inputs["state"], "actions": actions}
 

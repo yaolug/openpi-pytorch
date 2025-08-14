@@ -14,13 +14,14 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import orbax.checkpoint as ocp
+import torch
 
 from openpi.shared import image_tools
 import openpi.shared.array_typing as at
 
 logger = logging.getLogger("openpi")
 
-ArrayT = TypeVar("ArrayT", at.Array, jax.ShapeDtypeStruct)
+ArrayT = TypeVar("ArrayT", at.Array, at.TorchTensor, jax.ShapeDtypeStruct)
 
 
 class ModelType(enum.Enum):
@@ -84,23 +85,23 @@ class Observation(Generic[ArrayT]):
     """
 
     # Images, in [-1, 1] float32.
-    images: dict[str, at.Float[ArrayT, "*b h w c"]]
+    images: dict[str, at.FloatOrTorch("*b h w c")]
     # Image masks, with same keys as images.
-    image_masks: dict[str, at.Bool[ArrayT, "*b"]]
+    image_masks: dict[str, at.BoolOrTorch("*b")]
     # Low-dimensional robot state.
-    state: at.Float[ArrayT, "*b s"]
+    state: at.FloatOrTorch("*b s")
 
     # Tokenized prompt.
-    tokenized_prompt: at.Int[ArrayT, "*b l"] | None = None
+    tokenized_prompt: at.IntOrTorch("*b l") | None = None
     # Tokenized prompt mask.
-    tokenized_prompt_mask: at.Bool[ArrayT, "*b l"] | None = None
+    tokenized_prompt_mask: at.BoolOrTorch("*b l") | None = None
 
     # pi0-fast model specific fields.
 
     # Token auto-regressive mask (for FAST autoregressive model).
-    token_ar_mask: at.Int[ArrayT, "*b l"] | None = None
+    token_ar_mask: at.IntOrTorch("*b l") | None = None
     # Token loss mask (for FAST autoregressive model).
-    token_loss_mask: at.Bool[ArrayT, "*b l"] | None = None
+    token_loss_mask: at.BoolOrTorch("*b l") | None = None
 
     @classmethod
     def from_dict(cls, data: at.PyTree[ArrayT]) -> "Observation[ArrayT]":
@@ -112,6 +113,8 @@ class Observation(Generic[ArrayT]):
         for key in data["image"]:
             if data["image"][key].dtype == np.uint8:
                 data["image"][key] = data["image"][key].astype(np.float32) / 255.0 * 2.0 - 1.0
+            elif hasattr(data["image"][key], 'dtype') and data["image"][key].dtype == torch.uint8:
+                data["image"][key] = data["image"][key].to(torch.float32).permute(0, 3, 1, 2) / 255.0 * 2.0 - 1.0
         return cls(
             images=data["image"],
             image_masks=data["image_mask"],
@@ -132,7 +135,7 @@ class Observation(Generic[ArrayT]):
 
 # Defines the format of the actions. This field is included as "actions" inside the dictionary
 # produced by the data transforms.
-Actions = at.Float[ArrayT, "*b ah ad"]
+Actions = at.FloatOrTorch("*b ah ad")
 
 
 def preprocess_observation(
