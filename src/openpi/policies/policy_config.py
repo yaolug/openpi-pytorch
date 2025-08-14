@@ -6,13 +6,11 @@ from typing import Any
 import jax.numpy as jnp
 
 import openpi.models.model as _model
-from openpi.models_pytorch import pi0_pytorch
 import openpi.policies.policy as _policy
 import openpi.shared.download as download
 from openpi.training import checkpoints as _checkpoints
 from openpi.training import config as _config
 import openpi.transforms as transforms
-from safetensors.torch import load_file
 
 
 def create_trained_policy(
@@ -50,19 +48,7 @@ def create_trained_policy(
 
     logging.info("Loading model...")
     if is_pytorch:
-        print(f"train_config: {train_config}")
-        # Create the model with the config
-        model = pi0_pytorch.PI0Pytorch(config=train_config.model)
-
-        # Load weights if checkpoint exists
-        try:
-            state_dict = load_file(weight_path)
-            model.load_state_dict(state_dict)
-            logging.info(
-                f"Loaded PyTorch weights from {weight_path} (removed 'model.' prefix from {len([k for k in state_dict.keys() if k.startswith('model.')])} keys)"
-            )
-        except Exception as e:
-            logging.warning(f"Failed to load PyTorch weights: {e}, using random initialization")
+        model = train_config.model.load_pytorch(train_config, weight_path)
     else:
         model = train_config.model.load(_model.restore_params(checkpoint_dir / "params", dtype=jnp.bfloat16))
     data_config = train_config.data.create(train_config.assets_dirs, train_config.model)

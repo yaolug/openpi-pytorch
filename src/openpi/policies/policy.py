@@ -1,6 +1,7 @@
 from collections.abc import Sequence
 import logging
 import pathlib
+import time
 from typing import Any, TypeAlias
 
 import flax
@@ -55,25 +56,21 @@ class Policy(BasePolicy):
         # Make a copy since transformations may modify the inputs in place.
         inputs = jax.tree.map(lambda x: x, obs)
         inputs = self._input_transform(inputs)
-        if self._is_pytorch_model:
-            # Convert inputs to PyTorch tensors and move to correct device
-            inputs = jax.tree.map(lambda x: torch.from_numpy(np.array(x)).to(self._device)[None, ...], inputs)
-
-            # for key in inputs['image']:
-            #     inputs['image'][key] = inputs['image'][key].to(dtype=torch.float32).permute(0, 3, 1, 2) / 255.0 * 2.0 - 1.0
-
-            sample_rng_or_device = self._device
-        else:
+        if not self._is_pytorch_model:
             self._rng, sample_rng_or_device = jax.random.split(self._rng)
             # Make a batch and convert to jax.Array.
             inputs = jax.tree.map(lambda x: jnp.asarray(x)[np.newaxis, ...], inputs)
             self._rng, sample_rng_or_device = jax.random.split(self._rng)
+        else:
+            # Convert inputs to PyTorch tensors and move to correct device
+            inputs = jax.tree.map(lambda x: torch.from_numpy(np.array(x)).to(self._device)[None, ...], inputs)
+            sample_rng_or_device = self._device
+
         # Prepare kwargs for sample_actions
         sample_kwargs = dict(self._sample_kwargs)
         if noise is not None:
             if self._is_pytorch_model:
-                    noise = torch.from_numpy(noise)
-                    noise = noise.to(self._device)
+                noise = torch.from_numpy(noise).to(self._device)
             else:
                 noise = jnp.asarray(noise)
 
@@ -81,10 +78,11 @@ class Policy(BasePolicy):
                 noise = noise[None, ...]  # Make it (1, action_horizon, action_dim)
             sample_kwargs["noise"] = noise
 
-        actions = (
-            self._sample_actions(sample_rng_or_device, _model.Observation.from_dict(inputs), **sample_kwargs)
-        )
-        outputs = {"state": inputs["state"], "actions": actions}
+        start_time = time.monotonic()
+        outputs = {
+            "state": inputs["state"],
+            "actions": self._sample_actions(sample_rng_or_device, _model.Observation.from_dict(inputs), **sample_kwargs),
+        }
 
         # Unbatch and convert to np.ndarray.
         if self._is_pytorch_model:
@@ -97,7 +95,13 @@ class Policy(BasePolicy):
             outputs = jax.tree.map(convert_pytorch_tensor, outputs)
         else:
             outputs = jax.tree.map(lambda x: np.asarray(x[0, ...]), outputs)
-        return self._output_transform(outputs)
+
+        model_time = time.monotonic() - start_time
+        outputs = self._output_transform(outputs)
+        outputs["policy_timing"] = {
+            "infer_ms": model_time * 1000,
+        }
+        return outputs
 
     @property
     def metadata(self) -> dict[str, Any]:

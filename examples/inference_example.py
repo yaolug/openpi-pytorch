@@ -222,20 +222,36 @@ def run_pytorch_inference_example(observation, model_name, noise, checkpoint_dir
         # Print all PyTorch weights
         # _print_pytorch_model_weights(policy)
 
-        # Run inference
+        # Warm-up with 5 inference calls
         print("Running PyTorch inference...")
-        result = policy.infer(observation, noise=noise)
+        print("  Warming up with 5 inference calls...")
+        for _ in range(5):
+            _ = policy.infer(observation, noise=noise)
+        
+        # Test inference with 5 calls and average timing
+        print("  Testing with 5 inference calls...")
+        times = []
+        for i in range(5):
+            t0 = time.perf_counter()
+            result = policy.infer(observation, noise=noise)
+            t1 = time.perf_counter()
+            times.append(t1 - t0)
+        
+        pytorch_time = np.mean(times)
+        print(f"  Individual times: {[f'{t*1000:.2f}ms' for t in times]}")
+        print(f"  Average time: {pytorch_time*1000:.2f} ms")
 
         # Print results
         print("PyTorch inference completed!")
         print(f"  - Actions shape: {result['actions'].shape}")
         print(f"  - Actions range: [{result['actions'].min():.3f}, {result['actions'].max():.3f}]")
+        print(f"  - Inference time: {pytorch_time*1000:.2f} ms")
 
-        return result
+        return result, pytorch_time
 
     except ImportError as e:
         print(f"Failed to run PyTorch inference: {e}")
-        return None
+        return None, None
 
 
 def compare_results(jax_result, pytorch_result):
@@ -298,21 +314,36 @@ def run_jax_inference_compare_jit(observation, model_name, checkpoint_dir):
         # JIT policy
         policy_jit = _policy_config.create_trained_policy(config, checkpoint_dir)
         policy_jit._rng = rng_key
-        # Warm-up to trigger compilation
-        _ = policy_jit.infer(observation, noise=noise_np)
-        t0 = time.perf_counter()
-        jitted_result = policy_jit.infer(observation, noise=noise_np)
-        jitted_time = time.perf_counter() - t0
-        print(f"JAX (JIT) time: {jitted_time*1000:.2f} ms")
+        # Warm-up with 5 inference calls
+        print("  Warming up JAX (JIT) with 5 inference calls...")
+        for _ in range(5):
+            _ = policy_jit.infer(observation, noise=noise_np)
+        
+        # Test inference with 5 calls and average timing
+        print("  Testing JAX (JIT) with 5 inference calls...")
+        jit_times = []
+        for i in range(5):
+            t0 = time.perf_counter()
+            jitted_result = policy_jit.infer(observation, noise=noise_np)
+            t1 = time.perf_counter()
+            jit_times.append(t1 - t0)
+        
+        jitted_time = np.mean(jit_times)
+        print(f"JAX (JIT) individual times: {[f'{t*1000:.2f}ms' for t in jit_times]}")
+        print(f"JAX (JIT) average time: {jitted_time*1000:.2f} ms")
 
         # No-JIT policy by bypassing jitted wrapper
         policy_nojit = _policy_config.create_trained_policy(config, checkpoint_dir)
         policy_nojit._rng = rng_key
         # Force no-JIT path by using raw method
         policy_nojit._sample_actions = policy_nojit._model.sample_actions
-        t1 = time.perf_counter()
+        
+        # Run inference once (no warm-up needed for no-JIT)
+        print("  Running JAX (no-JIT) inference...")
+        t0 = time.perf_counter()
         nojit_result = policy_nojit.infer(observation, noise=noise_np)
-        nojit_time = time.perf_counter() - t1
+        t1 = time.perf_counter()
+        nojit_time = t1 - t0
         print(f"JAX (no-JIT) time: {nojit_time*1000:.2f} ms")
 
         # Compare outputs
@@ -371,7 +402,7 @@ def main():
     import torch
     torch.cuda.empty_cache()
     # Run PyTorch inference with same noise as JAX
-    pytorch_result = run_pytorch_inference_example(observation, args.model_name, noise, args.pytorch_checkpoint_dir)
+    pytorch_result, pytorch_time = run_pytorch_inference_example(observation, args.model_name, noise, args.pytorch_checkpoint_dir)
 
     # Compare JAX (JIT) with PyTorch
     if jax_jitted_result is not None and pytorch_result is not None:
@@ -380,6 +411,24 @@ def main():
     # Compare JAX (no-JIT) with PyTorch
     if jax_nojit_result is not None and pytorch_result is not None:
         compare_results(jax_nojit_result, pytorch_result)
+
+    # Print timing comparison
+    if jitted_time is not None and nojit_time is not None and pytorch_time is not None:
+        print("\n=== Timing Comparison ===")
+        print(f"JAX (JIT):     {jitted_time*1000:.2f} ms")
+        print(f"JAX (no-JIT):  {nojit_time*1000:.2f} ms")
+        print(f"PyTorch:       {pytorch_time*1000:.2f} ms")
+        
+        # Calculate speedup ratios
+        if jitted_time > 0:
+            jit_speedup = nojit_time / jitted_time
+            print(f"JIT speedup:   {jit_speedup:.2f}x")
+        
+        if pytorch_time > 0:
+            jit_vs_pytorch = pytorch_time / jitted_time
+            nojit_vs_pytorch = pytorch_time / nojit_time
+            print(f"JAX JIT vs PyTorch: {jit_vs_pytorch:.2f}x")
+            print(f"JAX no-JIT vs PyTorch: {nojit_vs_pytorch:.2f}x")
 
     print("\n" + "=" * 50)
     print("Example completed!")

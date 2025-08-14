@@ -14,8 +14,10 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import orbax.checkpoint as ocp
+from safetensors.torch import load_file
 import torch
 
+from openpi.models_pytorch import pi0_pytorch
 from openpi.shared import image_tools
 import openpi.shared.array_typing as at
 
@@ -236,6 +238,23 @@ class BaseModelConfig(abc.ABC):
         at.check_pytree_equality(expected=state.to_pure_dict(), got=params, check_shapes=True, check_dtypes=False)
         state.replace_by_pure_dict(params)
         return nnx.merge(graphdef, state)
+
+    def load_pytorch(self, train_config, weight_path: str):
+        print(f"train_config: {train_config}")
+        # Create the model with the config
+        model = pi0_pytorch.PI0Pytorch(config=train_config.model)
+
+        # Load weights if checkpoint exists
+        try:
+            state_dict = load_file(weight_path)
+            model.load_state_dict(state_dict)
+            logging.info(
+                f"Loaded PyTorch weights from {weight_path} (removed 'model.' prefix from {len([k for k in state_dict.keys() if k.startswith('model.')])} keys)"
+            )
+        except Exception as e:
+            logging.warning(f"Failed to load PyTorch weights: {e}, using random initialization")
+
+        return model
 
     @abc.abstractmethod
     def inputs_spec(self, *, batch_size: int = 1) -> tuple[Observation, Actions]:
