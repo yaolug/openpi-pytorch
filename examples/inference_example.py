@@ -232,13 +232,11 @@ def run_pytorch_inference_example(observation, model_name, noise, checkpoint_dir
         print("  Testing with 5 inference calls...")
         times = []
         for i in range(5):
-            t0 = time.perf_counter()
             result = policy.infer(observation, noise=noise)
-            t1 = time.perf_counter()
-            times.append(t1 - t0)
+            times.append(result["policy_timing"]["infer_ms"])
         
-        pytorch_time = np.mean(times)
-        print(f"  Individual times: {[f'{t*1000:.2f}ms' for t in times]}")
+        pytorch_time = np.mean(times) / 1000.0  # Convert from ms to seconds
+        print(f"  Individual times: {[f'{t:.2f}ms' for t in times]}")
         print(f"  Average time: {pytorch_time*1000:.2f} ms")
 
         # Print results
@@ -323,13 +321,11 @@ def run_jax_inference_compare_jit(observation, model_name, checkpoint_dir):
         print("  Testing JAX (JIT) with 5 inference calls...")
         jit_times = []
         for i in range(5):
-            t0 = time.perf_counter()
             jitted_result = policy_jit.infer(observation, noise=noise_np)
-            t1 = time.perf_counter()
-            jit_times.append(t1 - t0)
+            jit_times.append(jitted_result["policy_timing"]["infer_ms"])
         
-        jitted_time = np.mean(jit_times)
-        print(f"JAX (JIT) individual times: {[f'{t*1000:.2f}ms' for t in jit_times]}")
+        jitted_time = np.mean(jit_times) / 1000.0  # Convert from ms to seconds
+        print(f"JAX (JIT) individual times: {[f'{t:.2f}ms' for t in jit_times]}")
         print(f"JAX (JIT) average time: {jitted_time*1000:.2f} ms")
 
         # No-JIT policy by bypassing jitted wrapper
@@ -340,10 +336,8 @@ def run_jax_inference_compare_jit(observation, model_name, checkpoint_dir):
         
         # Run inference once (no warm-up needed for no-JIT)
         print("  Running JAX (no-JIT) inference...")
-        t0 = time.perf_counter()
         nojit_result = policy_nojit.infer(observation, noise=noise_np)
-        t1 = time.perf_counter()
-        nojit_time = t1 - t0
+        nojit_time = nojit_result["policy_timing"]["infer_ms"] / 1000.0  # Convert from ms to seconds
         print(f"JAX (no-JIT) time: {nojit_time*1000:.2f} ms")
 
         # Compare outputs
