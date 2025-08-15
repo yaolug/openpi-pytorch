@@ -5,6 +5,7 @@ from torch import Tensor
 from torch import nn
 import torch.nn.functional as F
 
+from openpi.models import model as _model
 import openpi.models.gemma as _gemma
 from openpi.models_pytorch.gemma_pytorch import PaliGemmaWithExpertModel
 
@@ -230,8 +231,15 @@ class PI0Pytorch(nn.Module):
 
         return embs, pad_masks, att_masks, adarms_cond
 
-    def forward(self, images, img_masks, lang_tokens, lang_masks, state, actions, noise=None, time=None) -> Tensor:
+    def forward(self, observation, actions, noise=None, time=None) -> Tensor:
         """Do a full training forward pass and compute the loss (batch_size x num_steps x num_motors)"""
+        observation = _model.preprocess_observation_pytorch(observation, train=True)
+        images = list(observation.images.values())
+        img_masks = list(observation.image_masks.values())
+        lang_tokens = observation.tokenized_prompt
+        lang_masks = observation.tokenized_prompt_mask
+        state = observation.state
+
         if noise is None:
             noise = self.sample_noise(actions.shape, actions.device)
 
@@ -253,6 +261,7 @@ class PI0Pytorch(nn.Module):
 
         # Add head dimension to attention mask: [B, seq_len, seq_len] -> [B, 1, seq_len, seq_len]
         att_2d_masks_4d = att_2d_masks[:, None, :, :]
+        att_2d_masks_4d = torch.where(att_2d_masks_4d, 0.0, -2.3819763e38)
 
         (_, suffix_out), _ = self.paligemma_with_expert.forward(
             attention_mask=att_2d_masks_4d,
@@ -260,7 +269,6 @@ class PI0Pytorch(nn.Module):
             past_key_values=None,
             inputs_embeds=[prefix_embs, suffix_embs],
             use_cache=False,
-            fill_kv_cache=False,
             adarms_cond=[None, adarms_cond]
         )
         suffix_out = suffix_out[:, -self.config.action_horizon :]
@@ -269,11 +277,14 @@ class PI0Pytorch(nn.Module):
         v_t = self.action_out_proj(suffix_out)
 
         losses = F.mse_loss(u_t, v_t, reduction="none")
+        loss = losses.mean()
+        print(f"Loss: {loss.item():.6f}")
         return losses
 
     @torch.no_grad()
     def sample_actions(self, device, observation, noise=None, num_steps=10) -> Tensor:
         """Do a full inference forward and compute the action (batch_size x num_steps x num_motors)"""
+        # observation = _model.preprocess_observation(observation, train=False)
         bsize = observation.state.shape[0]
         if noise is None:
             actions_shape = (bsize, self.config.action_horizon, self.config.action_dim)

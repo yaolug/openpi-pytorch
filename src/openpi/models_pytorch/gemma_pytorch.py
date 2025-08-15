@@ -2,6 +2,7 @@ from pytest import Cache
 import torch
 from torch import nn
 from transformers import GemmaForCausalLM, PaliGemmaForConditionalGeneration
+from transformers.models.gemma import modeling_gemma
 
 from transformers.models.auto import CONFIG_MAPPING
 
@@ -80,7 +81,7 @@ class PaliGemmaWithExpertModel(nn.Module):
         use_cache: bool | None = None,
         adarms_cond: list[torch.Tensor] | None = None,
     ):
-        if inputs_embeds[0] is not None:
+        if inputs_embeds[1] is None:
             prefix_output = self.paligemma.language_model.forward(
                 inputs_embeds=inputs_embeds[0],
                 attention_mask=attention_mask,
@@ -91,11 +92,8 @@ class PaliGemmaWithExpertModel(nn.Module):
             )
             prefix_past_key_values = prefix_output.past_key_values
             prefix_output = prefix_output.last_hidden_state
-        else:
-            prefix_output = None
-            prefix_past_key_values = None
-
-        if inputs_embeds[1] is not None:
+            suffix_output = None
+        elif inputs_embeds[0] is None:
             suffix_output = self.gemma_expert.model.forward(
                 inputs_embeds=inputs_embeds[1],
                 attention_mask=attention_mask,
@@ -104,8 +102,99 @@ class PaliGemmaWithExpertModel(nn.Module):
                 use_cache=use_cache,
                 adarms_cond=adarms_cond[1] if adarms_cond is not None else None,
             )
+            prefix_output = None
+            prefix_past_key_values = None
             suffix_output = suffix_output.last_hidden_state
         else:
-            suffix_output = None
+            models = [self.paligemma.language_model, self.gemma_expert.model]
+            num_layers = self.paligemma.config.text_config.num_hidden_layers
+            for layer_idx in range(num_layers):
+                query_states = []
+                key_states = []
+                value_states = []
+                gates = []
+                for i, hidden_states in enumerate(inputs_embeds):
+                    layer = models[i].layers[layer_idx]
+                    hidden_states, gate = layer.input_layernorm(hidden_states, cond=adarms_cond[i])
+                    hidden_states = hidden_states.to(dtype=torch.bfloat16)
+                    if gate is not None:
+                        gate = gate.to(dtype=torch.bfloat16)
+                    gates.append(gate)
 
+                    input_shape = hidden_states.shape[:-1]
+                    hidden_shape = (*input_shape, -1, layer.self_attn.head_dim)
+
+                    query_state = layer.self_attn.q_proj(hidden_states).view(hidden_shape).transpose(1, 2)
+                    key_state = layer.self_attn.k_proj(hidden_states).view(hidden_shape).transpose(1, 2)
+                    value_state = layer.self_attn.v_proj(hidden_states).view(hidden_shape).transpose(1, 2)
+
+                    query_states.append(query_state)
+                    key_states.append(key_state)
+                    value_states.append(value_state)
+
+                # B,L,H,D with L sequence length, H number of heads, D head dim
+                # concatenate on the number of embeddings/tokens
+                query_states = torch.cat(query_states, dim=2)
+                key_states = torch.cat(key_states, dim=2)
+                value_states = torch.cat(value_states, dim=2)
+
+                # Create a dummy tensor with the right shape for rotary embedding computation
+                dummy_tensor = torch.zeros(query_states.shape[0], query_states.shape[2], query_states.shape[-1], device=query_states.device, dtype=query_states.dtype)
+                cos, sin = self.paligemma.model.language_model.rotary_emb(dummy_tensor, position_ids)
+                query_states, key_states = modeling_gemma.apply_rotary_pos_emb(query_states, key_states, cos, sin, unsqueeze_dim=1)
+
+                # Transpose attention mask to match the new tensor format
+                # From [B, 1, seqlen, seqlen] to [B, num_heads, seqlen, seqlen]
+                if attention_mask is not None:
+                    attention_mask = attention_mask.expand(-1, query_states.shape[1], -1, -1)
+
+                # Use the attention module from the first model (paligemma) for the combined attention
+                # We need to use the correct attention module for the output projection
+                scaling = self.paligemma.language_model.layers[layer_idx].self_attn.scaling
+                attention_interface = modeling_gemma.eager_attention_forward
+                att_output, _ = attention_interface(
+                    self.paligemma.language_model.layers[layer_idx].self_attn, query_states, key_states, value_states, attention_mask, scaling
+                )
+                att_output = att_output.to(dtype=torch.bfloat16)
+
+                # first part of att_output is prefix (up to sequence length, [:, 0:prefix_seq_len])
+                outputs_embeds = []
+                start = 0
+                for i, hidden_states in enumerate(inputs_embeds):
+                    layer = models[i].layers[layer_idx]
+                    end = start + hidden_states.shape[1]
+
+                    if att_output.dtype != layer.self_attn.o_proj.weight.dtype:
+                        att_output = att_output.to(layer.self_attn.o_proj.weight.dtype)
+                    
+                    # Extract the portion of attention output for this layer
+                    layer_att_output = att_output[:, start:end]
+                    
+                    # Reshape to flatten the heads dimension: [batch, seqlen, num_heads, head_dim] -> [batch, seqlen, num_heads * head_dim]
+                    batch_size, seqlen, num_heads, head_dim = layer_att_output.shape
+                    layer_att_output = layer_att_output.view(batch_size, seqlen, num_heads * head_dim)
+                    
+                    # Use the output projection from the correct model
+                    out_emb = layer.self_attn.o_proj(layer_att_output)
+
+                    # first residual
+                    out_emb = modeling_gemma._gated_residual(hidden_states, out_emb, gates[i])
+                    out_emb, gate = layer.post_attention_layernorm(out_emb, cond=adarms_cond[i])
+                    out_emb = layer.mlp(out_emb)
+                    # second residual
+                    out_emb = modeling_gemma._gated_residual(hidden_states, out_emb, gate)
+                    outputs_embeds.append(out_emb)
+                    start = end
+                inputs_embeds = outputs_embeds
+
+            # final norm
+            outputs_embeds = []
+            for i, hidden_states in enumerate(inputs_embeds):
+                out_emb, _ = models[i].norm(hidden_states, cond=adarms_cond[i])
+                outputs_embeds.append(out_emb)
+
+            prefix_output = outputs_embeds[0]
+            suffix_output = outputs_embeds[1]
+            prefix_past_key_values = None
+        
         return [prefix_output, suffix_output], prefix_past_key_values

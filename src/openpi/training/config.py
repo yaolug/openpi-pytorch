@@ -724,7 +724,7 @@ _CONFIGS = [
             base_config=DataConfig(prompt_from_task=True),
             extra_delta_transform=False,
         ),
-        batch_size=256,
+        batch_size=4,
         lr_schedule=_optimizer.CosineDecaySchedule(
             warmup_steps=10_000,
             peak_lr=5e-5,
@@ -734,8 +734,28 @@ _CONFIGS = [
         optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
         ema_decay=0.999,
         weight_loader=weight_loaders.CheckpointWeightLoader(
-            "gs://openpi-assets-preview/checkpoints/pi05_may21_280k_v1/params"
+            "/home/jasonlu/.cache/openpi/openpi-assets-preview/checkpoints/pi05_base/params"
         ),
+        num_train_steps=30_000,
+    ),
+    TrainConfig(
+        name="pi05_libero_pytorch",
+        model=pi0_config.Pi0Config(pi05=True, action_horizon=10, discrete_state_input=False),
+        data=LeRobotLiberoDataConfig(
+            repo_id="physical-intelligence/libero",
+            base_config=DataConfig(prompt_from_task=True),
+            extra_delta_transform=False,
+        ),
+        batch_size=4,
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=10_000,
+            peak_lr=5e-5,
+            decay_steps=1_000_000,
+            decay_lr=5e-5,
+        ),
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        ema_decay=0.999,
+        weight_loader="/home/jasonlu/.cache/openpi/openpi-assets-preview/checkpoints/pi05_base_pytorch2",
         num_train_steps=30_000,
     ),
     #
@@ -874,6 +894,27 @@ _CONFIGS = [
         ),
         weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi0_base/params"),
         num_train_steps=20_000,
+    ),
+    #
+    # For ckpt conversion from jax to pytorch
+    #
+    TrainConfig(
+        name="pi0_base",
+        model=pi0_config.Pi0Config(),
+        data=FakeDataConfig(),
+        num_train_steps=10,
+        overwrite=True,
+        exp_name="pi0_base",
+        wandb_enabled=False,
+    ),
+    TrainConfig(
+        name="pi05_base",
+        model=pi0_config.Pi0Config(),
+        data=FakeDataConfig(),
+        num_train_steps=10,
+        overwrite=True,
+        exp_name="pi05_base",
+        wandb_enabled=False,
     ),
     #
     # Debugging configs.
