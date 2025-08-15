@@ -102,7 +102,8 @@ class PI0Pytorch(nn.Module):
             self.action_time_mlp_in = nn.Linear(2 * action_expert_config.width, action_expert_config.width)
             self.action_time_mlp_out = nn.Linear(action_expert_config.width, action_expert_config.width)
 
-        self.sample_actions = torch.compile(self.sample_actions, mode="reduce-overhead")
+        torch.set_float32_matmul_precision('high')
+        self.sample_actions = torch.compile(self.sample_actions, mode="max-autotune")
 
     def sample_noise(self, shape, device):
         noise = torch.normal(
@@ -317,8 +318,8 @@ class PI0Pytorch(nn.Module):
                 expanded_time,
             )
 
-            # Euler step
-            x_t += dt * v_t
+            # Euler step - use new tensor assignment instead of in-place operation
+            x_t = x_t + dt * v_t
             time += dt
         return x_t
 

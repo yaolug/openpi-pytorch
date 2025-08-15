@@ -77,10 +77,11 @@ class Policy(BasePolicy):
                 noise = noise[None, ...]  # Make it (1, action_horizon, action_dim)
             sample_kwargs["noise"] = noise
 
+        observation = _model.Observation.from_dict(inputs)
         start_time = time.monotonic()
         outputs = {
             "state": inputs["state"],
-            "actions": self._sample_actions(sample_rng_or_device, _model.Observation.from_dict(inputs), **sample_kwargs),
+            "actions": self._sample_actions(sample_rng_or_device, observation, **sample_kwargs),
         }
         model_time = time.monotonic() - start_time
         if self._is_pytorch_model:
