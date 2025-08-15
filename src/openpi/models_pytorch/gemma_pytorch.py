@@ -180,6 +180,8 @@ class PaliGemmaWithExpertModel(nn.Module):
                     # first residual
                     out_emb = modeling_gemma._gated_residual(hidden_states, out_emb, gates[i])
                     out_emb, gate = layer.post_attention_layernorm(out_emb, cond=adarms_cond[i])
+                    out_emb = out_emb.to(dtype=torch.bfloat16)
+
                     out_emb = layer.mlp(out_emb)
                     # second residual
                     out_emb = modeling_gemma._gated_residual(hidden_states, out_emb, gate)
