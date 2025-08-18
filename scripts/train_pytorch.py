@@ -23,7 +23,7 @@ Requirements
 Usage
 
 Single GPU:
-  python scripts/train_pytorch.py <config_name> --exp_name <run_name>
+  python scripts/train_pytorch.py <config_name> --exp_name <run_name> --ckpt_save_interval <interval>
   Example:
   python scripts/train_pytorch.py debug --exp_name pytorch_ddp_test
 
@@ -62,7 +62,7 @@ Environment Variables for Multi-Node:
 - NODE_RANK: Rank of the node (0 to nnodes-1)
 
 Checkpoint Parameters:
-- --ckpt_save_interval: Override the checkpoint save interval from config (e.g., --ckpt_save_interval 500)
+- --ckpt_save_interval: Override the checkpoint save interval from config (e.g., --save_interval 500)
 - --resume: Resume training from the latest checkpoint in the checkpoint directory
 - --overwrite: Overwrite existing checkpoint directory (cannot be used with --resume)
 
@@ -382,31 +382,11 @@ def train_loop(config: _config.TrainConfig, ckpt_save_interval: int = None):
 	if isinstance(config.weight_loader, str):
 		weight_path = config.weight_loader
 		logging.info(f"Loading weights from: {weight_path}")
-		
-		try:
-			# Check if it's a PyTorch checkpoint path (string)
-			if isinstance(weight_path, str):
-				import os
-				from safetensors.torch import load_file
-				
-				# Check if the path is a directory containing model.safetensors
-				if os.path.isdir(weight_path):
-					model_path = os.path.join(weight_path, "model.safetensors")
-					if os.path.exists(model_path):
-						state_dict = load_file(model_path)
-					else:
-						raise FileNotFoundError(f"model.safetensors not found in directory: {weight_path}")
-				else:
-					# Assume it's a direct path to the model file
-					state_dict = load_file(weight_path)
-				
-				(model.module if isinstance(model, DDP) else model).load_state_dict(state_dict)
-				logging.info(f"Loaded PyTorch weights from {weight_path}")
-			else:
-				# Handle other weight loading methods (e.g., JAX checkpoints)
-				logging.warning(f"Unsupported weight loading type: {type(weight_path)}")
-		except Exception as e:
-			logging.warning(f"Failed to load weights from {weight_path}: {e}, using random initialization")
+
+		model_path = os.path.join(weight_path, "model.safetensors")
+		from safetensors.torch import load_model
+		load_model((model.module if isinstance(model, DDP) else model), model_path)
+		logging.info(f"Loaded PyTorch weights from {weight_path}")
 
 	# Optimizer + learning rate schedule from config
 	warmup_steps = config.lr_schedule.warmup_steps

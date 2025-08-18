@@ -14,7 +14,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import orbax.checkpoint as ocp
-from safetensors.torch import load_file
+from safetensors.torch import load_model
 import torch
 
 from openpi.models_pytorch import pi0_pytorch
@@ -228,6 +228,15 @@ def preprocess_observation_pytorch(
     out_images = {}
     for key in image_keys:
         image = observation.images[key]
+        
+        # TODO: This is a hack to handle both [B, C, H, W] and [B, H, W, C] formats
+        # Handle both [B, C, H, W] and [B, H, W, C] formats
+        is_channels_first = image.shape[1] == 3  # Check if channels are in dimension 1
+        
+        if is_channels_first:
+            # Convert [B, C, H, W] to [B, H, W, C] for processing
+            image = image.permute(0, 2, 3, 1)
+        
         if image.shape[1:3] != image_resolution:
             logger.info(f"Resizing image {key} from {image.shape[1:3]} to {image_resolution}")
             image = image_tools.resize_with_pad_torch(image, *image_resolution)
@@ -319,6 +328,10 @@ def preprocess_observation_pytorch(
             # Back to [-1, 1]
             image = image * 2.0 - 1.0
 
+        # Convert back to [B, C, H, W] format if it was originally channels-first
+        if is_channels_first:
+            image = image.permute(0, 3, 1, 2)  # [B, H, W, C] -> [B, C, H, W]
+
         out_images[key] = image
 
     # obtain mask
@@ -375,19 +388,8 @@ class BaseModelConfig(abc.ABC):
 
     def load_pytorch(self, train_config, weight_path: str):
         print(f"train_config: {train_config}")
-        # Create the model with the config
         model = pi0_pytorch.PI0Pytorch(config=train_config.model)
-
-        # Load weights if checkpoint exists
-        try:
-            state_dict = load_file(weight_path)
-            model.load_state_dict(state_dict)
-            logging.info(
-                f"Loaded PyTorch weights from {weight_path} (removed 'model.' prefix from {len([k for k in state_dict.keys() if k.startswith('model.')])} keys)"
-            )
-        except Exception as e:
-            logging.warning(f"Failed to load PyTorch weights: {e}, using random initialization")
-
+        load_model(model, weight_path)
         return model
 
     @abc.abstractmethod

@@ -6,6 +6,31 @@ from transformers.models.gemma import modeling_gemma
 
 from transformers.models.auto import CONFIG_MAPPING
 
+# TODO: compare this rope vs gemma rope
+# def apply_rope(x, positions, max_wavelength=10_000):
+#     """
+#     Applies RoPE positions [B, L] to x [B, L, H, D].
+#     """
+#     d_half = x.shape[-1] // 2
+#     device = x.device
+#     dtype = x.dtype
+#     x = x.to(torch.float32)
+
+#     freq_exponents = (2.0 / x.shape[-1]) * torch.arange(d_half, dtype=torch.float32, device=device)
+#     timescale = max_wavelength**freq_exponents
+#     radians = positions[..., None].to(torch.float32) / timescale[None, None, :].to(torch.float32)
+
+#     radians = radians[..., None, :]
+
+#     sin = torch.sin(radians)  # .to(dtype=dtype)
+#     cos = torch.cos(radians)  # .to(dtype=dtype)
+
+#     x1, x2 = x.split(d_half, dim=-1)
+#     res = torch.empty_like(x)
+#     res[..., :d_half] = x1 * cos - x2 * sin
+#     res[..., d_half:] = x2 * cos + x1 * sin
+
+#     return res.to(dtype)
 
 class PaliGemmaWithExpertModel(nn.Module):
     def __init__(self, vlm_config, action_expert_config, use_adarms=[False, False]):
@@ -138,24 +163,21 @@ class PaliGemmaWithExpertModel(nn.Module):
                 key_states = torch.cat(key_states, dim=2)
                 value_states = torch.cat(value_states, dim=2)
 
-                # Create a dummy tensor with the right shape for rotary embedding computation
+                # query_states = apply_rope(query_states, position_ids)
+                # key_states = apply_rope(key_states, position_ids)
+
                 dummy_tensor = torch.zeros(query_states.shape[0], query_states.shape[2], query_states.shape[-1], device=query_states.device, dtype=query_states.dtype)
                 cos, sin = self.paligemma.model.language_model.rotary_emb(dummy_tensor, position_ids)
                 query_states, key_states = modeling_gemma.apply_rotary_pos_emb(query_states, key_states, cos, sin, unsqueeze_dim=1)
 
-                # Transpose attention mask to match the new tensor format
-                # From [B, 1, seqlen, seqlen] to [B, num_heads, seqlen, seqlen]
-                if attention_mask is not None:
-                    attention_mask = attention_mask.expand(-1, query_states.shape[1], -1, -1)
-
-                # Use the attention module from the first model (paligemma) for the combined attention
-                # We need to use the correct attention module for the output projection
+                batch_size = query_states.shape[0]
                 scaling = self.paligemma.language_model.layers[layer_idx].self_attn.scaling
-                attention_interface = modeling_gemma.eager_attention_forward
-                att_output, _ = attention_interface(
+                att_output, _ = modeling_gemma.eager_attention_forward(
                     self.paligemma.language_model.layers[layer_idx].self_attn, query_states, key_states, value_states, attention_mask, scaling
                 )
                 att_output = att_output.to(dtype=torch.bfloat16)
+                att_output = att_output.reshape(batch_size, -1, 1 * 8 * layer.self_attn.head_dim)
+
 
                 # first part of att_output is prefix (up to sequence length, [:, 0:prefix_seq_len])
                 outputs_embeds = []
@@ -166,25 +188,17 @@ class PaliGemmaWithExpertModel(nn.Module):
 
                     if att_output.dtype != layer.self_attn.o_proj.weight.dtype:
                         att_output = att_output.to(layer.self_attn.o_proj.weight.dtype)
-                    
-                    # Extract the portion of attention output for this layer
-                    layer_att_output = att_output[:, start:end]
-                    
-                    # Reshape to flatten the heads dimension: [batch, seqlen, num_heads, head_dim] -> [batch, seqlen, num_heads * head_dim]
-                    batch_size, seqlen, num_heads, head_dim = layer_att_output.shape
-                    layer_att_output = layer_att_output.view(batch_size, seqlen, num_heads * head_dim)
-                    
-                    # Use the output projection from the correct model
-                    out_emb = layer.self_attn.o_proj(layer_att_output)
+                    out_emb = layer.self_attn.o_proj(att_output[:, start:end])                    
 
                     # first residual
                     out_emb = modeling_gemma._gated_residual(hidden_states, out_emb, gates[i])
+                    after_first_residual = out_emb.clone()
                     out_emb, gate = layer.post_attention_layernorm(out_emb, cond=adarms_cond[i])
                     out_emb = out_emb.to(dtype=torch.bfloat16)
 
                     out_emb = layer.mlp(out_emb)
                     # second residual
-                    out_emb = modeling_gemma._gated_residual(hidden_states, out_emb, gate)
+                    out_emb = modeling_gemma._gated_residual(after_first_residual, out_emb, gate)
                     outputs_embeds.append(out_emb)
                     start = end
                 inputs_embeds = outputs_embeds
