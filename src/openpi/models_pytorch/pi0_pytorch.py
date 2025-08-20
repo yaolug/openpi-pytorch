@@ -233,7 +233,7 @@ class PI0Pytorch(nn.Module):
 
     def forward(self, observation, actions, noise=None, time=None) -> Tensor:
         """Do a full training forward pass and compute the loss (batch_size x num_steps x num_motors)"""
-        observation = _model.preprocess_observation_pytorch(observation, train=True)
+        # observation = _model.preprocess_observation_pytorch(observation, train=True)
         images = list(observation.images.values())
         img_masks = list(observation.image_masks.values())
         lang_tokens = observation.tokenized_prompt
@@ -251,6 +251,8 @@ class PI0Pytorch(nn.Module):
         u_t = noise - actions
 
         prefix_embs, prefix_pad_masks, prefix_att_masks = self.embed_prefix(images, img_masks, lang_tokens, lang_masks)
+        print(f"prefix_embs[0, :, 0]: {prefix_embs[0, :, 0]}")
+        return prefix_embs
         suffix_embs, suffix_pad_masks, suffix_att_masks, adarms_cond = self.embed_suffix(state, x_t, time)
 
         pad_masks = torch.cat([prefix_pad_masks, suffix_pad_masks], dim=1)
@@ -278,7 +280,7 @@ class PI0Pytorch(nn.Module):
 
         losses = F.mse_loss(u_t, v_t, reduction="none")
         loss = losses.mean()
-        print(f"Loss: {loss.item():.6f}")
+        #print(f"Loss: {loss.item():.6f}")
         return losses
 
     @torch.no_grad()

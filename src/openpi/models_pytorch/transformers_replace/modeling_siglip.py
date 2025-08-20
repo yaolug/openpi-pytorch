@@ -26,12 +26,12 @@ from torch import nn
 from torch.nn import BCEWithLogitsLoss, CrossEntropyLoss, MSELoss
 from torch.nn.init import _calculate_fan_in_and_fan_out
 
-from ...activations import ACT2FN
-from ...modeling_attn_mask_utils import _prepare_4d_attention_mask
-from ...modeling_layers import GradientCheckpointingLayer
-from ...modeling_outputs import BaseModelOutput, BaseModelOutputWithPooling, ImageClassifierOutput
-from ...modeling_utils import ALL_ATTENTION_FUNCTIONS, PreTrainedModel
-from ...utils import ModelOutput, auto_docstring, can_return_tuple, logging, torch_int
+from ..activations import ACT2FN
+from ..modeling_attn_mask_utils import _prepare_4d_attention_mask
+from ..modeling_layers import GradientCheckpointingLayer
+from ..modeling_outputs import BaseModelOutput, BaseModelOutputWithPooling, ImageClassifierOutput
+from ..modeling_utils import ALL_ATTENTION_FUNCTIONS, PreTrainedModel
+from ..utils import ModelOutput, auto_docstring, can_return_tuple, logging, torch_int
 from .configuration_siglip import SiglipConfig, SiglipTextConfig, SiglipVisionConfig
 
 
@@ -366,6 +366,7 @@ class SiglipAttention(nn.Module):
             )
         self.scale = self.head_dim**-0.5
         self.dropout = config.attention_dropout
+
         self.is_causal = False
 
         self.k_proj = nn.Linear(self.embed_dim, self.embed_dim)
@@ -779,11 +780,18 @@ class SiglipVisionTransformer(nn.Module):
         hidden_states = self.embeddings(pixel_values, interpolate_pos_encoding=interpolate_pos_encoding)
         # DEBUG
         hidden_states = hidden_states.to(torch.bfloat16)
-        #
+
         encoder_outputs: BaseModelOutput = self.encoder(
             inputs_embeds=hidden_states,
             output_attentions=output_attentions,
             output_hidden_states=output_hidden_states,
+        )
+
+        return BaseModelOutputWithPooling(
+            last_hidden_state=encoder_outputs.last_hidden_state,
+            pooler_output=None,
+            hidden_states=None,
+            attentions=None,
         )
 
         #return encoder_outputs

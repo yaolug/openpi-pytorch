@@ -7,30 +7,30 @@ from transformers.models.gemma import modeling_gemma
 from transformers.models.auto import CONFIG_MAPPING
 
 # TODO: compare this rope vs gemma rope
-# def apply_rope(x, positions, max_wavelength=10_000):
-#     """
-#     Applies RoPE positions [B, L] to x [B, L, H, D].
-#     """
-#     d_half = x.shape[-1] // 2
-#     device = x.device
-#     dtype = x.dtype
-#     x = x.to(torch.float32)
+def apply_rope(x, positions, max_wavelength=10_000):
+    """
+    Applies RoPE positions [B, L] to x [B, L, H, D].
+    """
+    d_half = x.shape[-1] // 2
+    device = x.device
+    dtype = x.dtype
+    x = x.to(torch.float32)
 
-#     freq_exponents = (2.0 / x.shape[-1]) * torch.arange(d_half, dtype=torch.float32, device=device)
-#     timescale = max_wavelength**freq_exponents
-#     radians = positions[..., None].to(torch.float32) / timescale[None, None, :].to(torch.float32)
+    freq_exponents = (2.0 / x.shape[-1]) * torch.arange(d_half, dtype=torch.float32, device=device)
+    timescale = max_wavelength**freq_exponents
+    radians = positions[..., None].to(torch.float32) / timescale[None, None, :].to(torch.float32)
 
-#     radians = radians[..., None, :]
+    radians = radians[..., None, :]
 
-#     sin = torch.sin(radians)  # .to(dtype=dtype)
-#     cos = torch.cos(radians)  # .to(dtype=dtype)
+    sin = torch.sin(radians)  # .to(dtype=dtype)
+    cos = torch.cos(radians)  # .to(dtype=dtype)
 
-#     x1, x2 = x.split(d_half, dim=-1)
-#     res = torch.empty_like(x)
-#     res[..., :d_half] = x1 * cos - x2 * sin
-#     res[..., d_half:] = x2 * cos + x1 * sin
+    x1, x2 = x.split(d_half, dim=-1)
+    res = torch.empty_like(x)
+    res[..., :d_half] = x1 * cos - x2 * sin
+    res[..., d_half:] = x2 * cos + x1 * sin
 
-#     return res.to(dtype)
+    return res.to(dtype)
 
 class PaliGemmaWithExpertModel(nn.Module):
     def __init__(self, vlm_config, action_expert_config, use_adarms=[False, False]):
@@ -149,9 +149,9 @@ class PaliGemmaWithExpertModel(nn.Module):
                     input_shape = hidden_states.shape[:-1]
                     hidden_shape = (*input_shape, -1, layer.self_attn.head_dim)
 
-                    query_state = layer.self_attn.q_proj(hidden_states).view(hidden_shape).transpose(1, 2)
-                    key_state = layer.self_attn.k_proj(hidden_states).view(hidden_shape).transpose(1, 2)
-                    value_state = layer.self_attn.v_proj(hidden_states).view(hidden_shape).transpose(1, 2)
+                    query_state = layer.self_attn.q_proj(hidden_states).view(hidden_shape)
+                    key_state = layer.self_attn.k_proj(hidden_states).view(hidden_shape)
+                    value_state = layer.self_attn.v_proj(hidden_states).view(hidden_shape)
 
                     query_states.append(query_state)
                     key_states.append(key_state)
@@ -159,16 +159,20 @@ class PaliGemmaWithExpertModel(nn.Module):
 
                 # B,L,H,D with L sequence length, H number of heads, D head dim
                 # concatenate on the number of embeddings/tokens
-                query_states = torch.cat(query_states, dim=2)
-                key_states = torch.cat(key_states, dim=2)
-                value_states = torch.cat(value_states, dim=2)
+                query_states = torch.cat(query_states, dim=1)
+                key_states = torch.cat(key_states, dim=1)
+                value_states = torch.cat(value_states, dim=1)
 
-                # query_states = apply_rope(query_states, position_ids)
-                # key_states = apply_rope(key_states, position_ids)
+                query_states = apply_rope(query_states, position_ids)
+                key_states = apply_rope(key_states, position_ids)
 
-                dummy_tensor = torch.zeros(query_states.shape[0], query_states.shape[2], query_states.shape[-1], device=query_states.device, dtype=query_states.dtype)
-                cos, sin = self.paligemma.model.language_model.rotary_emb(dummy_tensor, position_ids)
-                query_states, key_states = modeling_gemma.apply_rotary_pos_emb(query_states, key_states, cos, sin, unsqueeze_dim=1)
+                query_states = query_states.transpose(1, 2)
+                key_states = key_states.transpose(1, 2)
+                value_states = value_states.transpose(1, 2)
+
+                # dummy_tensor = torch.zeros(query_states.shape[0], query_states.shape[2], query_states.shape[-1], device=query_states.device, dtype=query_states.dtype)
+                # cos, sin = self.paligemma.model.language_model.rotary_emb(dummy_tensor, position_ids)
+                # query_states, key_states = modeling_gemma.apply_rotary_pos_emb(query_states, key_states, cos, sin, unsqueeze_dim=1)
 
                 batch_size = query_states.shape[0]
                 scaling = self.paligemma.language_model.layers[layer_idx].self_attn.scaling

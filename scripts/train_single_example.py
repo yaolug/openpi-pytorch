@@ -163,18 +163,18 @@ def test_jax_single_example(noise, time):
     weight_path = "/home/jasonlu/.cache/openpi/openpi-assets-preview/checkpoints/pi05_base/params"
     print(f"Loading JAX weights from: {weight_path}")
     
-    try:
-        # Use the same approach as in policy_config.py
-        params = _model.restore_params(weight_path, dtype=jnp.bfloat16)
-        # Apply the params to the model using NNX state management
-        import flax.nnx as nnx
-        graphdef, model_state = nnx.split(model)
-        model_state.replace_by_pure_dict(params)
-        model = nnx.merge(graphdef, model_state)
-        print("✅ JAX weights loaded successfully!")
-    except Exception as e:
-        print(f"❌ Failed to load JAX weights: {e}")
-        print("Continuing with random initialization...")
+    # try:
+    # Use the same approach as in policy_config.py
+    params = _model.restore_params(weight_path, dtype=jnp.bfloat16)
+    # Apply the params to the model using NNX state management
+    import flax.nnx as nnx
+    graphdef, model_state = nnx.split(model)
+    model_state.replace_by_pure_dict(params)
+    model = nnx.merge(graphdef, model_state)
+    print("✅ JAX weights loaded successfully!")
+    # except Exception as e:
+    #     print(f"❌ Failed to load JAX weights: {e}")
+    #     print("Continuing with random initialization...")
     
     # Create fixed example
     example = create_fixed_example()
@@ -205,18 +205,18 @@ def test_jax_single_example(noise, time):
     print(f"Time shape: {time_jax.shape}, dtype: {time_jax.dtype}")
     
     # Test forward pass with fixed noise and time
-    try:
-        # Use the modified compute_loss method that accepts external noise and time
-        losses = model.compute_loss(rng, observation, actions, train=False, noise=noise_jax, time=time_jax)
-        print(f"JAX forward pass successful!")
-        print(f"Losses shape: {losses.shape}")
-        print(f"Losses dtype: {losses.dtype}")
-        mean_loss = jnp.mean(losses).item()
-        print(f"Mean loss: {mean_loss:.6f}")
-        return True, losses
-    except Exception as e:
-        print(f"JAX forward pass failed: {e}")
-        return False, None
+    # try:
+    # Use the modified compute_loss method that accepts external noise and time
+    losses = model.compute_loss(rng, observation, actions, train=False, noise=noise_jax, time=time_jax)
+    print(f"JAX forward pass successful!")
+    print(f"Losses shape: {losses.shape}")
+    print(f"Losses dtype: {losses.dtype}")
+    mean_loss = jnp.mean(losses).item()
+    print(f"Mean loss: {mean_loss:.6f}")
+    return True, losses
+    # except Exception as e:
+    #     print(f"JAX forward pass failed: {e}")
+    #     return False, None
 
 
 def compare_losses(pytorch_loss, jax_loss):
@@ -270,6 +270,7 @@ def compare_losses(pytorch_loss, jax_loss):
                     
                     # Element-wise differences
                     element_diff = np.abs(pytorch_flat - jax_flat)
+                    print(f"element_diff[0]: {element_diff[0:2048*816:2048]}")
                     max_element_diff = np.max(element_diff)
                     mean_element_diff = np.mean(element_diff)
                     

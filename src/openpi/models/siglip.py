@@ -237,6 +237,8 @@ class _Module(nn.Module):
 
         # Kevin edit: now cast back to dtype_mm (potentially half precision)
         x = x.astype(self.dtype_mm)
+        
+        jax.debug.print(f"dtype_mm: {self.dtype_mm}")
 
         x, out["encoder"] = Encoder(
             depth=self.depth,
@@ -287,6 +289,7 @@ class _Module(nn.Module):
             x_2d = out["logits_2d"] = head(x_2d)
             x = out["logits"] = head(x)
 
+        out["encoded"] = head(out["encoded"])
         return x, out
 
 

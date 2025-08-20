@@ -111,9 +111,9 @@ class Pi0(_model.BaseModel):
         tokens = []
         # embed images
         for name in obs.images:
-            image_tokens, _ = self.PaliGemma.img(obs.images[name], train=False)
+            image_tokens, out = self.PaliGemma.img(obs.images[name], train=False)
 
-            tokens.append(image_tokens)
+            tokens.append(out["encoded"])
             input_mask.append(
                 einops.repeat(
                     obs.image_masks[name],
@@ -197,7 +197,7 @@ class Pi0(_model.BaseModel):
         time: at.Float[at.Array, "*b"] | None = None
     ) -> at.Float[at.Array, "*b ah"]:
         preprocess_rng, noise_rng, time_rng = jax.random.split(rng, 3)
-        observation = _model.preprocess_observation(preprocess_rng, observation, train=train)
+        # observation = _model.preprocess_observation(preprocess_rng, observation, train=train)
         batch_shape = actions.shape[:-2]
         
         # Use provided noise and time if available, otherwise generate them
@@ -214,6 +214,8 @@ class Pi0(_model.BaseModel):
 
         # one big forward pass of prefix + suffix at once
         prefix_tokens, prefix_mask, prefix_ar_mask = self.embed_prefix(observation)
+        jax.debug.print(f"prefix_out[0, :, 0]: {prefix_tokens[0, :, 0]}")
+        return prefix_tokens
         suffix_tokens, suffix_mask, suffix_ar_mask, adarms_cond = self.embed_suffix(observation, x_t, time)
         input_mask = jnp.concatenate([prefix_mask, suffix_mask], axis=1)
         ar_mask = jnp.concatenate([prefix_ar_mask, suffix_ar_mask], axis=0)

@@ -91,6 +91,7 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader as TorchDataLoader
 from torch.utils.data.distributed import DistributedSampler
 import wandb
+from tqdm import tqdm
 
 import openpi.training.config as _config
 import openpi.training.data_loader as _data
@@ -429,6 +430,7 @@ def train_loop(config: _config.TrainConfig, ckpt_save_interval: int = None):
 
 	model.train()
 	start_time = time.time()
+	infos = []  # Collect stats over log interval
 	if is_main:
 		logging.info(f"Running on: {platform.node()} | world_size={dist.get_world_size() if use_ddp else 1}")
 		logging.info(f"Training config: batch_size={config.batch_size}, num_train_steps={config.num_train_steps}")
@@ -438,6 +440,8 @@ def train_loop(config: _config.TrainConfig, ckpt_save_interval: int = None):
 			logging.info(f"EMA decay: {config.ema_decay}")
 
 	# Training loop - iterate until we reach num_train_steps
+	pbar = tqdm(total=config.num_train_steps, initial=global_step, desc="Training", disable=not is_main) if is_main else None
+	
 	while global_step < config.num_train_steps:
 		if use_ddp:
 			sampler.set_epoch(global_step // len(loader))
@@ -459,7 +463,7 @@ def train_loop(config: _config.TrainConfig, ckpt_save_interval: int = None):
 			optim.zero_grad(set_to_none=True)
 
 			observation = _model.Observation.from_dict(batch)
-			with torch.cuda.amp.autocast(enabled=False):
+			with torch.amp.autocast('cuda', enabled=False):
 				losses = model(observation, actions)
 				loss = losses.mean()
 			loss.backward()
@@ -472,25 +476,51 @@ def train_loop(config: _config.TrainConfig, ckpt_save_interval: int = None):
 					for param, ema_param in zip(model.parameters(), ema_model.parameters()):
 						ema_param.data.mul_(config.ema_decay).add_(param.data, alpha=1 - config.ema_decay)
 
+			# Collect stats
+			if is_main:
+				infos.append({
+					"loss": loss.item(),
+					"learning_rate": optim.param_groups[0]['lr'],
+				})
+
 			if is_main and (global_step % config.log_interval == 0):
 				elapsed = time.time() - start_time
-				logging.info(f"step={global_step} loss={loss.item():.4f} lr={optim.param_groups[0]['lr']:.2e} time={elapsed:.1f}s")
+				
+				# Average stats over log interval
+				avg_loss = sum(info["loss"] for info in infos) / len(infos)
+				avg_lr = sum(info["learning_rate"] for info in infos) / len(infos)
+				
+				logging.info(f"step={global_step} loss={avg_loss:.4f} lr={avg_lr:.2e} time={elapsed:.1f}s")
 				
 				# Log to wandb
 				if config.wandb_enabled:
 					wandb.log({
-						"loss": loss.item(),
-						"learning_rate": optim.param_groups[0]['lr'],
+						"loss": avg_loss,
+						"learning_rate": avg_lr,
 						"step": global_step,
 						"time_per_step": elapsed / config.log_interval,
 					}, step=global_step)
 				
 				start_time = time.time()
+				infos = []  # Reset stats collection
 
 			# Save checkpoint using the new mechanism
 			save_checkpoint(model, optim, global_step, config, is_main, ckpt_save_interval, ema_model)
 
 			global_step += 1
+			
+			# Update progress bar
+			if pbar is not None:
+				pbar.update(1)
+				pbar.set_postfix({
+					'loss': f'{loss.item():.4f}',
+					'lr': f'{optim.param_groups[0]["lr"]:.2e}',
+					'step': global_step
+				})
+
+	# Close progress bar
+	if pbar is not None:
+		pbar.close()
 
 	# Finish wandb run
 	if is_main and config.wandb_enabled:
