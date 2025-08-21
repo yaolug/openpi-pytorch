@@ -270,19 +270,14 @@ class SiglipVisionEmbeddings(nn.Module):
 
     def forward(self, pixel_values: torch.FloatTensor, interpolate_pos_encoding=False) -> torch.Tensor:
         _, _, height, width = pixel_values.shape
-
-        target_dtype = self.patch_embedding.weight.dtype  # shape = scalar
-        #self.patch_embedding = self.patch_embedding.to(dtype=torch.bfloat16).to(dtype=torch.float32)
-
-        patch_embeds = self.patch_embedding(pixel_values.to(dtype=target_dtype))  # shape = [batch_size, embed_dim, grid_h, grid_w]
-        embeddings = patch_embeds.flatten(2).transpose(1, 2)  # shape = [batch_size, num_patches, embed_dim]
+        target_dtype = self.patch_embedding.weight.dtype
+        patch_embeds = self.patch_embedding(pixel_values.to(dtype=target_dtype))  # shape = [*, width, grid, grid]
+        embeddings = patch_embeds.flatten(2).transpose(1, 2)
 
         if interpolate_pos_encoding:
             embeddings = embeddings + self.interpolate_pos_encoding(embeddings, height, width)
         else:
-            #self.position_embedding = self.position_embedding.to(dtype=torch.bfloat16).to(dtype=torch.float32)
             embeddings = embeddings + self.position_embedding(self.position_ids)
-
         return embeddings
 
 
@@ -776,17 +771,16 @@ class SiglipVisionTransformer(nn.Module):
         output_hidden_states = (
             output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
         )
+
         hidden_states = self.embeddings(pixel_values, interpolate_pos_encoding=interpolate_pos_encoding)
-        # DEBUG
         hidden_states = hidden_states.to(torch.bfloat16)
-        #
+
         encoder_outputs: BaseModelOutput = self.encoder(
             inputs_embeds=hidden_states,
             output_attentions=output_attentions,
             output_hidden_states=output_hidden_states,
         )
 
-        #return encoder_outputs
         last_hidden_state = encoder_outputs.last_hidden_state
         last_hidden_state = self.post_layernorm(last_hidden_state)
 

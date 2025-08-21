@@ -182,7 +182,19 @@ We provide more examples for how to fine-tune and run inference with our models 
 
 ## PyTorch Support
 
-openpi now supports PyTorch models alongside the original JAX implementation. This provides more flexibility for deployment and integration with existing PyTorch ecosystems.
+openpi now provides PyTorch implementations of π₀ and π₀.₅ models alongside the original JAX versions (π₀-FAST is not currently supported in PyTorch). The PyTorch models offer greater deployment flexibility and seamless integration with PyTorch-based ML stacks, while maintaining feature parity with their JAX counterparts.
+
+### Setup
+1. Upgrade the transformers library to 4.53.2
+   - The required version is already specified in pyproject.toml
+   - If you set up your environment previously, reinstall it to ensure you have transformers 4.53.2
+   - You can verify the version with `pip show transformers`
+
+2. Apply the transformers library patches
+   ```bash
+   cp -r ./src/openpi/models_pytorch/transformers_replace/* .venv/lib/python3.11/site-packages/transformers/
+   ```
+   This copies the custom model implementations needed to match our JAX implementation.
 
 ### Converting JAX Models to PyTorch
 
