@@ -2,7 +2,7 @@
 
 openpi holds open-source models and packages for robotics, published by the [Physical Intelligence team](https://www.physicalintelligence.company/).
 
-Currently, this repo contains two types of models:
+Currently, this repo contains three types of models:
 - the [π₀ model](https://www.physicalintelligence.company/blog/pi0), a flow-based diffusion vision-language-action model (VLA).
 - the [π₀-FAST model](https://www.physicalintelligence.company/research/fast), an autoregressive VLA, based on the FAST action tokenizer.
 - the [π₀.₅ model](https://www.physicalintelligence.company/blog/pi05), an upgraded version of π₀ with better open-world generalization.
@@ -13,8 +13,9 @@ This is an experiment: $\pi_0$ was developed for our own robots, which differ fr
 
 ## Updates
 
-- [Jun 2025]: We have added [instructions](examples/droid/README_train.md) for using `openpi` to train VLAs on the full [DROID dataset](https://droid-dataset.github.io/). This is an approximate open-source implementation of the training pipeline used to train pi0-FAST-DROID. 
-
+- [Aug 2025] We released PyTorch support in openpi!
+- [Aug 2025] We released π₀.₅, an upgraded version of π₀ with better open-world generalization.
+- [Jun 2025] We have added [instructions](examples/droid/README_train.md) for using `openpi` to train VLAs on the full [DROID dataset](https://droid-dataset.github.io/). This is an approximate open-source implementation of the training pipeline used to train π₀-FAST-DROID.
 
 ## Requirements
 
@@ -179,7 +180,48 @@ We provide more examples for how to fine-tune and run inference with our models 
 - [ALOHA Real](examples/aloha_real)
 - [UR5](examples/ur5)
 
+## PyTorch Support
 
+openpi now supports PyTorch models alongside the original JAX implementation. This provides more flexibility for deployment and integration with existing PyTorch ecosystems.
+
+### Converting JAX Models to PyTorch
+
+To convert a JAX model checkpoint to PyTorch format:
+
+```bash
+python examples/convert_jax_model_to_pytorch.py \
+    --checkpoint_dir /path/to/jax/checkpoint/params \
+    --output_path /path/to/converted/pytorch/checkpoint
+```
+
+### Running Inference with PyTorch
+
+The PyTorch implementation uses the same API as the JAX version - you only need to change the checkpoint path to point to the converted PyTorch model:
+
+```python
+from openpi.training import config
+from openpi.policies import policy_config
+from openpi.shared import download
+
+config = config.get_config("pi05_droid")
+checkpoint_dir = "/path/to/converted/pytorch/checkpoint"
+
+# Create a trained policy (automatically detects PyTorch format)
+policy = policy_config.create_trained_policy(config, checkpoint_dir)
+
+# Run inference (same API as JAX)
+action_chunk = policy.infer(example)["actions"]
+```
+
+### Policy Server with PyTorch
+
+The policy server works identically with PyTorch models - just point to the converted checkpoint directory:
+
+```bash
+uv run scripts/serve_policy.py policy:checkpoint \
+    --policy.config=pi05_droid \
+    --policy.dir=/path/to/converted/pytorch/checkpoint
+```
 
 ## Troubleshooting
 
