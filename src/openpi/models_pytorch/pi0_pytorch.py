@@ -1,4 +1,5 @@
 import math
+import logging
 
 import torch
 from torch import Tensor
@@ -106,6 +107,71 @@ class PI0Pytorch(nn.Module):
         torch.set_float32_matmul_precision('high')
         self.sample_actions = torch.compile(self.sample_actions, mode="max-autotune")
         #self.forward = torch.compile(self.forward, mode="reduce-overhead")
+        
+        # Initialize gradient checkpointing flag
+        self.gradient_checkpointing_enabled = False
+
+    def gradient_checkpointing_enable(self):
+        """Enable gradient checkpointing for memory optimization."""
+        self.gradient_checkpointing_enabled = True
+        
+        # Enable gradient checkpointing in the underlying models
+        if hasattr(self.paligemma_with_expert, 'paligemma'):
+            if hasattr(self.paligemma_with_expert.paligemma, 'language_model'):
+                self.paligemma_with_expert.paligemma.language_model.gradient_checkpointing = True
+                logging.info("Enabled gradient checkpointing in PaliGemma language model")
+        
+        if hasattr(self.paligemma_with_expert, 'gemma_expert'):
+            if hasattr(self.paligemma_with_expert.gemma_expert, 'model'):
+                self.paligemma_with_expert.gemma_expert.model.gradient_checkpointing = True
+                logging.info("Enabled gradient checkpointing in Gemma expert model")
+        
+        logging.info("Enabled gradient checkpointing for PI0Pytorch model")
+
+    def gradient_checkpointing_disable(self):
+        """Disable gradient checkpointing."""
+        self.gradient_checkpointing_enabled = False
+        
+        # Disable gradient checkpointing in the underlying models
+        if hasattr(self.paligemma_with_expert, 'paligemma'):
+            if hasattr(self.paligemma_with_expert.paligemma, 'language_model'):
+                self.paligemma_with_expert.paligemma.language_model.gradient_checkpointing = False
+        
+        if hasattr(self.paligemma_with_expert, 'gemma_expert'):
+            if hasattr(self.paligemma_with_expert.gemma_expert, 'model'):
+                self.paligemma_with_expert.gemma_expert.model.gradient_checkpointing = False
+        
+        logging.info("Disabled gradient checkpointing for PI0Pytorch model")
+
+    def is_gradient_checkpointing_enabled(self):
+        """Check if gradient checkpointing is enabled."""
+        return self.gradient_checkpointing_enabled
+
+    def get_gradient_checkpointing_status(self):
+        """Get detailed gradient checkpointing status of underlying models."""
+        status = {
+            'main_model': self.gradient_checkpointing_enabled,
+            'paligemma_language_model': False,
+            'gemma_expert_model': False
+        }
+        
+        if hasattr(self.paligemma_with_expert, 'paligemma'):
+            if hasattr(self.paligemma_with_expert.paligemma, 'language_model'):
+                status['paligemma_language_model'] = getattr(
+                    self.paligemma_with_expert.paligemma.language_model, 
+                    'gradient_checkpointing', 
+                    False
+                )
+        
+        if hasattr(self.paligemma_with_expert, 'gemma_expert'):
+            if hasattr(self.paligemma_with_expert.gemma_expert, 'model'):
+                status['gemma_expert_model'] = getattr(
+                    self.paligemma_with_expert.gemma_expert.model, 
+                    'gradient_checkpointing', 
+                    False
+                )
+        
+        return status
 
     def sample_noise(self, shape, device):
         noise = torch.normal(
