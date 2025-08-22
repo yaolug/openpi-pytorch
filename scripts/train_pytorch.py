@@ -499,6 +499,14 @@ def train_loop(config: _config.TrainConfig, resume: bool = False, ckpt_save_inte
 	# Apply memory optimizations
 	setup_memory_optimizations(model, device, enable_gradient_checkpointing)
 	
+	# Log gradient checkpointing status if enabled
+	if enable_gradient_checkpointing and is_main:
+		if hasattr(model, 'get_gradient_checkpointing_status'):
+			status = model.get_gradient_checkpointing_status()
+			logging.info(f"Gradient checkpointing status: {status}")
+		else:
+			logging.info("Gradient checkpointing enabled but status check not available")
+	
 	# Check model parameters for debugging
 	if is_main:
 		check_model_parameters(model, device)
