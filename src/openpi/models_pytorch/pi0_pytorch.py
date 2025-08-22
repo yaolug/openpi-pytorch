@@ -105,7 +105,7 @@ class PI0Pytorch(nn.Module):
 
         torch.set_float32_matmul_precision('high')
         self.sample_actions = torch.compile(self.sample_actions, mode="max-autotune")
-        self.forward = torch.compile(self.forward, mode="reduce-overhead")
+        #self.forward = torch.compile(self.forward, mode="reduce-overhead")
 
     def sample_noise(self, shape, device):
         noise = torch.normal(
@@ -234,7 +234,12 @@ class PI0Pytorch(nn.Module):
 
     def forward(self, observation, actions, noise=None, time=None) -> Tensor:
         """Do a full training forward pass and compute the loss (batch_size x num_steps x num_motors)"""
-        observation = _model.preprocess_observation_pytorch(observation, train=True)
+        # # Use torch.compile-compatible preprocessing if we're in a compiled context
+        # if torch._dynamo.is_compiling():
+        #     observation = _model.preprocess_observation_pytorch_torch_compile(observation, train=True)
+        # else:
+        #     observation = _model.preprocess_observation_pytorch(observation, train=True)
+        observation = _model.preprocess_observation_pytorch_torch_compile(observation, train=True)
         images = list(observation.images.values())
         img_masks = list(observation.image_masks.values())
         lang_tokens = observation.tokenized_prompt

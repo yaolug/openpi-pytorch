@@ -21,10 +21,12 @@ Single GPU:
   python scripts/train_pytorch.py <config_name> --exp_name <run_name> --ckpt_save_interval <interval>
   Example:
   python scripts/train_pytorch.py debug --exp_name pytorch_ddp_test
+  python scripts/train_pytorch.py debug --exp_name pytorch_ddp_test --resume  # Resume from latest checkpoint
 Multi-GPU (single node):
   torchrun --standalone --nnodes=1 --nproc_per_node=<num_gpus> scripts/train_pytorch.py <config_name> --exp_name <run_name>
   Example:
   torchrun --standalone --nnodes=1 --nproc_per_node=2 scripts/train_pytorch.py pi0_aloha_sim --exp_name pytorch_ddp_test
+  torchrun --standalone --nnodes=1 --nproc_per_node=2 scripts/train_pytorch.py pi0_aloha_sim --exp_name pytorch_ddp_test --resume
 Multi-Node Training:
   # On master node (node 0):
   torchrun --nnodes=<num_nodes> --nproc_per_node=<gpus_per_node> --rdzv_id=<unique_id> --rdzv_backend=c10d --rdzv_endpoint=<master_ip>:<port> scripts/train_pytorch.py <config_name> --exp_name <run_name>
@@ -65,6 +67,9 @@ Notes
   by the selected TrainConfig (e.g., `LeRobot*` configs for real datasets or `FakeDataConfig`).
 - Supports Weights & Biases (wandb) logging for experiment tracking and visualization.
 - Checkpoints include model state, optimizer state, and training metadata for complete resume capability.
+- Checkpoints are saved in experiment-specific directories: <checkpoint_dir>/<step>/
+- Resume functionality automatically finds the latest checkpoint for the specified experiment name.
+- Checkpoint loading handles both PyTorch and JAX/Flax checkpoints for compatibility.
 - For optimal multi-node performance, ensure high-bandwidth network connectivity (e.g., InfiniBand).
 - Monitor GPU utilization and network bandwidth during multi-node training.
 - Memory optimizations can significantly reduce GPU memory usage while maintaining training quality.
@@ -239,27 +244,28 @@ def save_checkpoint(model, optimizer, global_step, config, is_main, ckpt_save_in
 
 	# Only save if it's time to save or if it's the final step
 	if (global_step % save_interval == 0 and global_step > 0) or global_step == config.num_train_steps - 1:
-		ckpt_dir = os.path.join(config.checkpoint_dir, f"{global_step}")
-		os.makedirs(ckpt_dir, exist_ok=True)
+		# Ensure checkpoint_dir is a Path object and create the step-specific directory
+		ckpt_dir = config.checkpoint_dir / f"{global_step}"
+		ckpt_dir.mkdir(parents=True, exist_ok=True)
 
 		# Save model state
 		state_dict = get_model_state_dict(model)
-		torch.save(state_dict, os.path.join(ckpt_dir, "pytorch_model.pt"))
+		torch.save(state_dict, ckpt_dir / "pytorch_model.pt")
 
 		# Save optimizer state
-		torch.save(optimizer.state_dict(), os.path.join(ckpt_dir, "optimizer.pt"))
+		torch.save(optimizer.state_dict(), ckpt_dir / "optimizer.pt")
 
 		# Save EMA state if available
 		if ema_model is not None:
-			torch.save(ema_model.state_dict(), os.path.join(ckpt_dir, "ema_model.pt"))
+			torch.save(ema_model.state_dict(), ckpt_dir / "ema_model.pt")
 
-		# Save training metadata
+		# Save training metadata (avoid saving full config to prevent JAX/Flax compatibility issues)
 		metadata = {
 			"global_step": global_step,
 			"config": dataclasses.asdict(config),
 			"timestamp": time.time(),
 		}
-		torch.save(metadata, os.path.join(ckpt_dir, "metadata.pt"))
+		torch.save(metadata, ckpt_dir / "metadata.pt")
 
 		logging.info(f"Saved checkpoint at step {global_step} -> {ckpt_dir}")
 
@@ -268,44 +274,49 @@ def save_checkpoint(model, optimizer, global_step, config, is_main, ckpt_save_in
 			wandb.log({"checkpoint_step": global_step}, step=global_step)
 
 
-def load_checkpoint(model, optimizer, config, device, ema_model=None):
+def load_checkpoint(model, optimizer, checkpoint_dir, device, ema_model=None):
 	"""Load the latest checkpoint and return the global step."""
 	checkpoint_steps = []
-	for d in config.checkpoint_dir.iterdir():
+	for d in checkpoint_dir.iterdir():
 		if d.is_dir() and d.name.isdigit():
 			checkpoint_steps.append(int(d.name))
 	
 	if not checkpoint_steps:
-		raise FileNotFoundError(f"No checkpoints found in {config.checkpoint_dir}")
+		raise FileNotFoundError(f"No checkpoints found in {checkpoint_dir}")
 	
 	latest_step = max(checkpoint_steps)
-	ckpt_dir = os.path.join(config.checkpoint_dir, f"{latest_step}")
+	ckpt_dir = checkpoint_dir / f"{latest_step}"
 	
 	# Load model state
-	model_state_dict = torch.load(os.path.join(ckpt_dir, "pytorch_model.pt"), map_location=device)
+	model_state_dict = torch.load(ckpt_dir / "pytorch_model.pt", map_location=device)
 	(model.module if isinstance(model, DDP) else model).load_state_dict(model_state_dict)
 	
 	# Load optimizer state
-	optimizer_state_dict = torch.load(os.path.join(ckpt_dir, "optimizer.pt"), map_location=device)
+	optimizer_state_dict = torch.load(ckpt_dir / "optimizer.pt", map_location=device)
 	optimizer.load_state_dict(optimizer_state_dict)
 	
 	# Load EMA state if available
-	if ema_model is not None and os.path.exists(os.path.join(ckpt_dir, "ema_model.pt")):
-		ema_state_dict = torch.load(os.path.join(ckpt_dir, "ema_model.pt"), map_location=device)
+	if ema_model is not None and (ckpt_dir / "ema_model.pt").exists():
+		ema_state_dict = torch.load(ckpt_dir / "ema_model.pt", map_location=device)
 		ema_model.load_state_dict(ema_state_dict)
 		logging.info(f"Loaded EMA state from checkpoint")
 	
-	# Load metadata
-	metadata = torch.load(os.path.join(ckpt_dir, "metadata.pt"), map_location=device)
-	
-	logging.info(f"Loaded checkpoint from step {latest_step} -> {ckpt_dir}")
-	return metadata["global_step"]
+	# Load metadata (weights_only=False needed for older checkpoints that might contain JAX/Flax objects)
+	try:
+		metadata = torch.load(ckpt_dir / "metadata.pt", map_location=device, weights_only=False)
+		global_step = metadata.get("global_step", latest_step)
+		logging.info(f"Loaded checkpoint from step {latest_step} -> {ckpt_dir}")
+		return global_step
+	except Exception as e:
+		logging.warning(f"Failed to load metadata from checkpoint: {e}")
+		logging.warning("Using checkpoint step number as global step")
+		return latest_step
 
 
-def get_latest_checkpoint_step(config):
-	"""Get the latest checkpoint step number."""
+def get_latest_checkpoint_step(checkpoint_dir):
+	"""Get the latest checkpoint step number from a checkpoint directory."""
 	checkpoint_steps = []
-	for d in config.checkpoint_dir.iterdir():
+	for d in checkpoint_dir.iterdir():
 		if d.is_dir() and d.name.isdigit():
 			checkpoint_steps.append(int(d.name))
 
@@ -386,7 +397,7 @@ def setup_memory_optimizations(model, device, enable_gradient_checkpointing=Fals
 			logging.info(f"Cleared CUDA cache for device {device.index}")
 
 
-def train_loop(config: _config.TrainConfig, ckpt_save_interval: int = None, gradient_accumulation_steps: int = 1, mixed_precision: bool = True, max_memory_usage: float = None, enable_gradient_checkpointing: bool = False):
+def train_loop(config: _config.TrainConfig, resume: bool = False, ckpt_save_interval: int = None, gradient_accumulation_steps: int = 1, mixed_precision: bool = True, max_memory_usage: float = None, enable_gradient_checkpointing: bool = False):
 	use_ddp, local_rank, device = setup_ddp()
 	is_main = (not use_ddp) or (dist.get_rank() == 0)
 	set_seed(config.seed, local_rank)
@@ -397,24 +408,32 @@ def train_loop(config: _config.TrainConfig, ckpt_save_interval: int = None, grad
 
 	# Initialize checkpoint directory and wandb
 	resuming = False
-	if config.resume:
-		# Check if checkpoint directory exists and has checkpoints
-		if config.checkpoint_dir.exists():
-			latest_step = get_latest_checkpoint_step(config)
+	if resume:
+		# Find checkpoint directory based on experiment name
+		exp_checkpoint_dir = config.checkpoint_dir
+		if exp_checkpoint_dir.exists():
+			latest_step = get_latest_checkpoint_step(exp_checkpoint_dir)
 			if latest_step is not None:
 				resuming = True
-				logging.info(f"Resuming from checkpoint directory: {config.checkpoint_dir} at step {latest_step}")
+				logging.info(f"Resuming from experiment checkpoint directory: {exp_checkpoint_dir} at step {latest_step}")
 			else:
-				raise FileNotFoundError(f"No checkpoints found in {config.checkpoint_dir} for resume")
+				raise FileNotFoundError(f"No checkpoints found in {exp_checkpoint_dir} for resume")
 		else:
-			raise FileNotFoundError(f"Checkpoint directory {config.checkpoint_dir} does not exist for resume")
+			raise FileNotFoundError(f"Experiment checkpoint directory {exp_checkpoint_dir} does not exist for resume")
 	elif config.overwrite and config.checkpoint_dir.exists():
 		import shutil
 		shutil.rmtree(config.checkpoint_dir)
 		logging.info(f"Overwriting checkpoint directory: {config.checkpoint_dir}")
 
-	# Create checkpoint directory
-	config.checkpoint_dir.mkdir(parents=True, exist_ok=True)
+	# Create checkpoint directory with experiment name
+	if not resuming:
+		# For new runs, create experiment-specific checkpoint directory
+		exp_checkpoint_dir = config.checkpoint_dir
+		exp_checkpoint_dir.mkdir(parents=True, exist_ok=True)
+		logging.info(f"Created experiment checkpoint directory: {exp_checkpoint_dir}")
+	else:
+		# For resume, checkpoint_dir is already set to the experiment directory
+		logging.info(f"Using existing experiment checkpoint directory: {config.checkpoint_dir}")
 
 	# Initialize wandb (only on main process)
 	if is_main:
@@ -534,7 +553,7 @@ def train_loop(config: _config.TrainConfig, ckpt_save_interval: int = None, grad
 	# Load checkpoint if resuming
 	global_step = 0
 	if resuming:
-		global_step = load_checkpoint(model, optim, config, device, ema_model)
+		global_step = load_checkpoint(model, optim, config.checkpoint_dir, device, ema_model)
 		logging.info(f"Resumed training from step {global_step}")
 
 	def lr_schedule(step: int):
@@ -692,6 +711,8 @@ def main():
 	# Parse additional command line arguments for memory optimization
 	import argparse
 	parser = argparse.ArgumentParser(add_help=False)
+	parser.add_argument("--resume", action="store_true", default=False,
+						help="Resume training from the latest checkpoint for the experiment (handles both PyTorch and JAX checkpoints)")
 	parser.add_argument("--ckpt_save_interval", type=int, default=None, 
 						help="Interval for saving checkpoints (overrides config.save_interval)")
 	parser.add_argument("--gradient_accumulation_steps", type=int, default=1,
@@ -716,6 +737,7 @@ def main():
 		os.environ["TORCH_DISTRIBUTED_DEBUG"] = args.ddp_debug_level
 
 	train_loop(config, 
+			   resume=args.resume,
 			   ckpt_save_interval=args.ckpt_save_interval,
 			   gradient_accumulation_steps=args.gradient_accumulation_steps,
 			   mixed_precision=mixed_precision,
