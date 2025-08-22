@@ -7,6 +7,7 @@ import torch.nn.functional as F
 
 import openpi.models.gemma as _gemma
 from openpi.models_pytorch.gemma_pytorch import PaliGemmaWithExpertModel
+import openpi.models.model as _model
 
 
 def get_safe_dtype(target_dtype, device_type):
@@ -232,7 +233,7 @@ class PI0Pytorch(nn.Module):
 
     def forward(self, observation, actions, noise=None, time=None) -> Tensor:
         """Do a full training forward pass and compute the loss (batch_size x num_steps x num_motors)"""
-        # observation = _model.preprocess_observation_pytorch(observation, train=True)
+        observation = _model.preprocess_observation_pytorch(observation, train=True)
         images = list(observation.images.values())
         img_masks = list(observation.image_masks.values())
         lang_tokens = observation.tokenized_prompt
