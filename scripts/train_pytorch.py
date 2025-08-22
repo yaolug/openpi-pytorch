@@ -731,7 +731,7 @@ def main():
 						help="Disable mixed precision training")
 	parser.add_argument("--max_memory_usage", type=float, default=None,
 						help="Maximum GPU memory usage in GB (default: None, auto-detect)")
-	parser.add_argument("--enable_gradient_checkpointing", action="store_true", default=False,
+	parser.add_argument("--gradckpt", action="store_true", default=False,
 						help="Enable gradient checkpointing for memory optimization")
 	parser.add_argument("--ddp_debug_level", type=str, default="INFO", choices=["INFO", "DETAIL", "OFF"],
 						help="DDP debugging level (default: INFO)")
@@ -750,7 +750,7 @@ def main():
 			   gradient_accumulation_steps=args.gradient_accumulation_steps,
 			   mixed_precision=mixed_precision,
 			   max_memory_usage=args.max_memory_usage,
-			   enable_gradient_checkpointing=args.enable_gradient_checkpointing)
+			   enable_gradient_checkpointing=args.gradckpt)
 
 
 if __name__ == "__main__":
