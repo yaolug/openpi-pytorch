@@ -11,6 +11,7 @@ import jax
 import jax.numpy as jnp
 import flax.nnx as nnx
 import flax
+from unittest.mock import patch
 
 from openpi.models import model as _model
 from openpi.models.pi0_config import Pi0Config
@@ -83,6 +84,16 @@ def create_fixed_noise_and_time(batch_size, action_horizon, action_dim):
     return noise, time
 
 
+def mock_preprocess_observation(rng, observation, **kwargs):
+    """Mock function that returns observation unchanged to disable preprocessing."""
+    return observation
+
+
+def mock_preprocess_observation_pytorch(observation, **kwargs):
+    """Mock function that returns observation unchanged to disable preprocessing."""
+    return observation
+
+
 def test_pytorch_single_example(noise, time):
     """Test PyTorch training on single example."""
     print("\n=== Testing PyTorch on Single Example ===")
@@ -136,13 +147,15 @@ def test_pytorch_single_example(noise, time):
     model.eval()
     with torch.no_grad():
         #try:
-        losses = model(observation, actions, noise=noise_tensor, time=time_tensor)
-        print(f"PyTorch forward pass successful!")
-        print(f"Losses shape: {losses.shape}")
-        print(f"Losses dtype: {losses.dtype}")
-        # mean_loss = losses.to(torch.float32).mean().item()
-        # print(f"Mean loss: {mean_loss:.6f}")
-        return True, losses
+        # Use mock to disable preprocessing
+        with patch('openpi.models.model.preprocess_observation_pytorch', side_effect=mock_preprocess_observation_pytorch):
+            losses = model(observation, actions, noise=noise_tensor, time=time_tensor)
+            print(f"PyTorch forward pass successful!")
+            print(f"Losses shape: {losses.shape}")
+            print(f"Losses dtype: {losses.dtype}")
+            mean_loss = losses.to(torch.float32).mean().item()
+            print(f"Mean loss: {mean_loss:.6f}")
+            return True, losses
         # except Exception as e:
         #     print(f"PyTorch forward pass failed: {e}")
         #     return False, None
@@ -384,13 +397,15 @@ def test_jax_single_example(noise, time, debug_single_layer=False):
     # Test forward pass with fixed noise and time
     # try:
     # Use the modified compute_loss method that accepts external noise and time
-    losses = model.compute_loss(rng, observation, actions, train=False, noise=noise_jax, time=time_jax)
-    print(f"JAX forward pass successful!")
-    print(f"Losses shape: {losses.shape}")
-    print(f"Losses dtype: {losses.dtype}")
-    mean_loss = jnp.mean(losses).item()
-    print(f"Mean loss: {mean_loss:.6f}")
-    return True, losses
+    # Use mock to disable preprocessing
+    with patch('openpi.models.model.preprocess_observation', side_effect=mock_preprocess_observation):
+        losses = model.compute_loss(rng, observation, actions, train=False, noise=noise_jax, time=time_jax)
+        print(f"JAX forward pass successful!")
+        print(f"Losses shape: {losses.shape}")
+        print(f"Losses dtype: {losses.dtype}")
+        mean_loss = jnp.mean(losses).item()
+        print(f"Mean loss: {mean_loss:.6f}")
+        return True, losses
     # except Exception as e:
     #     print(f"JAX forward pass failed: {e}")
     #     return False, None
@@ -404,6 +419,9 @@ def compare_losses(pytorch_loss, jax_loss):
     print("\n" + "=" * 70)
     print("📊 LOSS COMPARISON")
     print("=" * 70)
+
+    print(f"PyTorch loss: {pytorch_loss}")
+    print(f"JAX loss: {jax_loss}")
 
     # # Handle tensor inputs by computing mean if needed
     # if hasattr(pytorch_loss, 'mean'):
@@ -502,6 +520,7 @@ def main():
     print("📁 Loading pre-trained weights for both models...")
     print("🎯 Using fixed noise and time values for deterministic comparison...")
     print("🔧 Debug mode: JAX model will use only 1 encoder layer for faster debugging...")
+    print("🚫 Preprocessing disabled: Image augmentations and resizing are bypassed for fair comparison...")
 
     # Generate fixed noise and time
     noise, time = create_fixed_noise_and_time(
@@ -542,6 +561,7 @@ def main():
     print("3. If losses differ significantly, investigate the differences")
     print("4. Check if the noise and time handling is consistent between implementations")
     print("5. Use the same example in full training runs")
+    print("6. Note: Preprocessing (image augmentations) is disabled for this comparison")
 
 
 if __name__ == "__main__":

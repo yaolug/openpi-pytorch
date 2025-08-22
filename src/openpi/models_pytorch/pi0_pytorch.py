@@ -105,6 +105,7 @@ class PI0Pytorch(nn.Module):
 
         torch.set_float32_matmul_precision('high')
         self.sample_actions = torch.compile(self.sample_actions, mode="max-autotune")
+        self.forward = torch.compile(self.forward, mode="reduce-overhead")
 
     def sample_noise(self, shape, device):
         noise = torch.normal(
@@ -277,9 +278,7 @@ class PI0Pytorch(nn.Module):
 
         v_t = self.action_out_proj(suffix_out)
 
-        #losses = F.mse_loss(u_t, v_t, reduction="none")
-
-        losses = torch.square(v_t - u_t)
+        losses = F.mse_loss(u_t, v_t, reduction="none")
         return losses
 
     @torch.no_grad()

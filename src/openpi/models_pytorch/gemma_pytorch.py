@@ -106,7 +106,7 @@ class PaliGemmaWithExpertModel(nn.Module):
         past_key_values: list[torch.FloatTensor] | Cache | None = None,
         inputs_embeds: list[torch.FloatTensor] = None,
         use_cache: bool | None = None,
-        adarms_cond: list[torch.Tensor] | None = None,
+        adarms_cond: list[torch.Tensor] = [None, None],
     ):
         if inputs_embeds[1] is None:
             prefix_output = self.paligemma.language_model.forward(
@@ -120,7 +120,7 @@ class PaliGemmaWithExpertModel(nn.Module):
             prefix_past_key_values = prefix_output.past_key_values
             prefix_output = prefix_output.last_hidden_state
             suffix_output = None
-        if inputs_embeds[0] is None:
+        elif inputs_embeds[0] is None:
             suffix_output = self.gemma_expert.model.forward(
                 inputs_embeds=inputs_embeds[1],
                 attention_mask=attention_mask,
@@ -150,9 +150,9 @@ class PaliGemmaWithExpertModel(nn.Module):
 
                     input_shape = hidden_states.shape[:-1]
                     hidden_shape = (*input_shape, -1, layer.self_attn.head_dim)
-                    query_state = layer.self_attn.q_proj(hidden_states).view(hidden_shape)
-                    key_state = layer.self_attn.k_proj(hidden_states).view(hidden_shape)
-                    value_state = layer.self_attn.v_proj(hidden_states).view(hidden_shape)
+                    query_state = layer.self_attn.q_proj(hidden_states).view(hidden_shape).transpose(1, 2)
+                    key_state = layer.self_attn.k_proj(hidden_states).view(hidden_shape).transpose(1, 2)
+                    value_state = layer.self_attn.v_proj(hidden_states).view(hidden_shape).transpose(1, 2)
 
                     query_states.append(query_state)
                     key_states.append(key_state)
@@ -160,20 +160,20 @@ class PaliGemmaWithExpertModel(nn.Module):
 
                 # B,L,H,D with L sequence length, H number of heads, D head dim
                 # concatenate on the number of embeddings/tokens
-                query_states = torch.cat(query_states, dim=1)
-                key_states = torch.cat(key_states, dim=1)
-                value_states = torch.cat(value_states, dim=1)
+                query_states = torch.cat(query_states, dim=2)
+                key_states = torch.cat(key_states, dim=2)
+                value_states = torch.cat(value_states, dim=2)
 
-                query_states = apply_rope(query_states, position_ids)
-                key_states = apply_rope(key_states, position_ids)
+                # query_states = apply_rope(query_states, position_ids)
+                # key_states = apply_rope(key_states, position_ids)
 
-                query_states = query_states.transpose(1, 2)
-                key_states = key_states.transpose(1, 2)
-                value_states = value_states.transpose(1, 2)
+                # query_states = query_states.transpose(1, 2)
+                # key_states = key_states.transpose(1, 2)
+                # value_states = value_states.transpose(1, 2)
 
-                # dummy_tensor = torch.zeros(query_states.shape[0], query_states.shape[2], query_states.shape[-1], device=query_states.device, dtype=query_states.dtype)
-                # cos, sin = self.paligemma.model.language_model.rotary_emb(dummy_tensor, position_ids)
-                # query_states, key_states = modeling_gemma.apply_rotary_pos_emb(query_states, key_states, cos, sin, unsqueeze_dim=1)
+                dummy_tensor = torch.zeros(query_states.shape[0], query_states.shape[2], query_states.shape[-1], device=query_states.device, dtype=query_states.dtype)
+                cos, sin = self.paligemma.model.language_model.rotary_emb(dummy_tensor, position_ids)
+                query_states, key_states = modeling_gemma.apply_rotary_pos_emb(query_states, key_states, cos, sin, unsqueeze_dim=1)
 
                 batch_size = query_states.shape[0]
                 scaling = self.paligemma.language_model.layers[layer_idx].self_attn.scaling
