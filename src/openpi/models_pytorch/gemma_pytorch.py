@@ -141,9 +141,9 @@ class PaliGemmaWithExpertModel(nn.Module):
                 for i, hidden_states in enumerate(inputs_embeds):
                     layer = models[i].layers[layer_idx]
                     hidden_states, gate = layer.input_layernorm(hidden_states, cond=adarms_cond[i])
-                    hidden_states = hidden_states.to(dtype=torch.bfloat16)
-                    if gate is not None:
-                        gate = gate.to(dtype=torch.bfloat16)
+                    # hidden_states = hidden_states.to(dtype=torch.bfloat16)
+                    # if gate is not None:
+                    #     gate = gate.to(dtype=torch.bfloat16)
                     gates.append(gate)
 
                     input_shape = hidden_states.shape[:-1]
@@ -179,7 +179,7 @@ class PaliGemmaWithExpertModel(nn.Module):
                 att_output, _ = modeling_gemma.eager_attention_forward(
                     self.paligemma.language_model.layers[layer_idx].self_attn, query_states, key_states, value_states, attention_mask, scaling
                 )
-                att_output = att_output.to(dtype=torch.bfloat16)
+                #att_output = att_output.to(dtype=torch.bfloat16)
                 att_output = att_output.reshape(batch_size, -1, 1 * 8 * layer.self_attn.head_dim)
 
 

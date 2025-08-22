@@ -113,7 +113,7 @@ class Pi0(_model.BaseModel):
         for name in obs.images:
             image_tokens, out = self.PaliGemma.img(obs.images[name], train=False)
 
-            tokens.append(out["encoded"])
+            tokens.append(image_tokens)
             input_mask.append(
                 einops.repeat(
                     obs.image_masks[name],
@@ -214,8 +214,7 @@ class Pi0(_model.BaseModel):
 
         # one big forward pass of prefix + suffix at once
         prefix_tokens, prefix_mask, prefix_ar_mask = self.embed_prefix(observation)
-        jax.debug.print(f"prefix_out[0, :, 0]: {prefix_tokens[0, :, 0]}")
-        return prefix_tokens
+        
         suffix_tokens, suffix_mask, suffix_ar_mask, adarms_cond = self.embed_suffix(observation, x_t, time)
         input_mask = jnp.concatenate([prefix_mask, suffix_mask], axis=1)
         ar_mask = jnp.concatenate([prefix_ar_mask, suffix_ar_mask], axis=0)

@@ -105,6 +105,7 @@ class PI0Pytorch(nn.Module):
 
         torch.set_float32_matmul_precision('high')
         self.sample_actions = torch.compile(self.sample_actions, mode="max-autotune")
+        self.forward = torch.compile(self.forward, mode="reduce-overhead")
 
     def sample_noise(self, shape, device):
         noise = torch.normal(
@@ -251,9 +252,9 @@ class PI0Pytorch(nn.Module):
         u_t = noise - actions
 
         prefix_embs, prefix_pad_masks, prefix_att_masks = self.embed_prefix(images, img_masks, lang_tokens, lang_masks)
-        print(f"prefix_embs[0, :, 0]: {prefix_embs[0, :, 0]}")
-        return prefix_embs
+        
         suffix_embs, suffix_pad_masks, suffix_att_masks, adarms_cond = self.embed_suffix(state, x_t, time)
+        suffix_embs = suffix_embs.to(dtype=torch.bfloat16)
 
         pad_masks = torch.cat([prefix_pad_masks, suffix_pad_masks], dim=1)
         att_masks = torch.cat([prefix_att_masks, suffix_att_masks], dim=1)
@@ -279,8 +280,8 @@ class PI0Pytorch(nn.Module):
         v_t = self.action_out_proj(suffix_out)
 
         losses = F.mse_loss(u_t, v_t, reduction="none")
-        loss = losses.mean()
-        #print(f"Loss: {loss.item():.6f}")
+        # loss = losses.mean()
+        # print(f"Loss: {loss.item():.6f}")
         return losses
 
     @torch.no_grad()

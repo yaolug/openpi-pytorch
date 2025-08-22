@@ -60,7 +60,7 @@ class GemmaRMSNorm(nn.Module):
             # Initialize with zeros (matches source implementation)
             nn.init.zeros_(self.dense.weight)
         else:
-            self.weight = nn.Parameter(torch.zeros(dim, dtype=torch.bfloat16))
+            self.weight = nn.Parameter(torch.zeros(dim, dtype=torch.float32))
             self.dense = None
 
     def _norm(self, x):
@@ -498,7 +498,7 @@ class GemmaModel(GemmaPreTrainedModel):
 
         # embed positions
         hidden_states = inputs_embeds
-        hidden_states = hidden_states.to(torch.bfloat16)
+        #hidden_states = hidden_states.to(torch.bfloat16)
 
         # create position embeddings to be shared across the decoder layers
         position_embeddings = self.rotary_emb(hidden_states, position_ids)

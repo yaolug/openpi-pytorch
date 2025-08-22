@@ -183,10 +183,16 @@ def train_step(
             lambda _, x: x.value.ndim > 1,
         ),
     )
+    
+    # Get current learning rate from the schedule
+    lr_schedule = config.lr_schedule.create()
+    current_lr = lr_schedule(state.step)
+    
     info = {
         "loss": loss,
         "grad_norm": optax.global_norm(grads),
         "param_norm": optax.global_norm(kernel_params),
+        "learning_rate": current_lr,
     }
     return new_state, info
 
@@ -263,10 +269,25 @@ def main(config: _config.TrainConfig):
         if step % config.log_interval == 0:
             stacked_infos = common_utils.stack_forest(infos)
             reduced_info = jax.device_get(jax.tree.map(jnp.mean, stacked_infos))
-            info_str = ", ".join(f"{k}={v:.4f}" for k, v in reduced_info.items())
+            # Format learning rate with scientific notation for better readability
+            info_str_parts = []
+            for k, v in reduced_info.items():
+                if k == "learning_rate":
+                    info_str_parts.append(f"{k}={v:.2e}")
+                else:
+                    info_str_parts.append(f"{k}={v:.4f}")
+            info_str = ", ".join(info_str_parts)
             pbar.write(f"Step {step}: {info_str}")
             wandb.log(reduced_info, step=step)
             infos = []
+        
+        # Update progress bar with current metrics
+        current_info = jax.device_get(info)
+        pbar.set_postfix({
+            'loss': f'{current_info["loss"]:.4f}',
+            'lr': f'{current_info["learning_rate"]:.2e}',
+            'step': step
+        })
         batch = next(data_iter)
 
         if (step % config.save_interval == 0 and step > start_step) or step == config.num_train_steps - 1:

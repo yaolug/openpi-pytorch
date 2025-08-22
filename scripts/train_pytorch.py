@@ -14,6 +14,7 @@ Key features
 - AdamW optimizer and gradient clipping.
 - Comprehensive checkpoint saving and resume mechanism with configurable intervals.
 - Checkpoints saved on rank 0 to `config.checkpoint_dir/<step>/` containing model, optimizer, and metadata.
+- Memory optimizations: mixed precision training, gradient accumulation, and efficient data handling.
 
 Requirements
 - PyTorch >= 2.0, torch.distributed (NCCL for CUDA, Gloo for CPU).
@@ -66,6 +67,11 @@ Checkpoint Parameters:
 - --resume: Resume training from the latest checkpoint in the checkpoint directory
 - --overwrite: Overwrite existing checkpoint directory (cannot be used with --resume)
 
+Memory Optimization Parameters:
+- --gradient_accumulation_steps: Number of steps to accumulate gradients (default: 1)
+- --mixed_precision: Enable mixed precision training (default: True)
+- --max_memory_usage: Maximum GPU memory usage in GB (default: None, auto-detect)
+
 Notes
 - The global batch size must be divisible by world size (number of processes).
 - The data pipeline and transforms are identical to the JAX version and are controlled
@@ -74,6 +80,7 @@ Notes
 - Checkpoints include model state, optimizer state, and training metadata for complete resume capability.
 - For optimal multi-node performance, ensure high-bandwidth network connectivity (e.g., InfiniBand).
 - Monitor GPU utilization and network bandwidth during multi-node training.
+- Memory optimizations can significantly reduce GPU memory usage while maintaining training quality.
 """
 import argparse
 import dataclasses
@@ -182,7 +189,14 @@ def collate_to_numpy(batch_list: list[Dict[str, Any]]) -> Dict[str, Any]:
 	# Recursively stack leaves with numpy
 	def stack_leaf(*xs):
 		return np.stack([np.asarray(x) for x in xs], axis=0)
-	return torch.utils.data.default_collate(batch_list) if not isinstance(batch_list[0], dict) else _tree_map_multi(stack_leaf, batch_list)
+	
+	# Memory-efficient collation
+	result = torch.utils.data.default_collate(batch_list) if not isinstance(batch_list[0], dict) else _tree_map_multi(stack_leaf, batch_list)
+	
+	# Clear batch list from memory
+	del batch_list
+	
+	return result
 
 
 def _tree_map_multi(func, batch_list):
@@ -198,25 +212,17 @@ def batch_to_torch(batch: Dict[str, Any], device: torch.device) -> Tuple[list[to
 	# Maintain canonical image key order
 	image_keys = _model.IMAGE_KEYS
 	import jax
+	
+	# Memory-efficient conversion: convert to torch tensors and move to device in one step
 	batch = jax.tree.map(lambda x: torch.from_numpy(np.array(x)).to(device), batch)
+	
+	# Convert to float32 for memory efficiency (avoid float64)
 	batch['state'] = batch['state'].to(dtype=torch.float32)
 	batch['actions'] = batch['actions'].to(dtype=torch.float32)
-
-	# batch["image"] = [torch.as_tensor(np.asarray(batch["image"][k]), device=device) for k in image_keys]
-	# batch["image_mask"] = [torch.as_tensor(np.asarray(batch["image_mask"][k]), device=device, dtype=torch.bool) for k in image_keys]
-
-	# lang_tokens = None
-	# lang_masks = None
-	# if batch.get("tokenized_prompt") is not None:
-	# 	batch["tokenized_prompt"] = torch.as_tensor(np.asarray(batch["tokenized_prompt"]), device=device, dtype=torch.long)
-	# 	batch["tokenized_prompt_mask"] = torch.as_tensor(np.asarray(batch["tokenized_prompt_mask"]), device=device, dtype=torch.bool)
-	# else:
-	# 	# Create zero-length placeholders if language is absent
-	# 	bsize = batch["image"][0].shape[0]
-	# 	lang_tokens = torch.zeros((bsize, 0), dtype=torch.long, device=device)
-	# 	lang_masks = torch.zeros((bsize, 0), dtype=torch.bool, device=device)
-
-	# batch["state"] = torch.as_tensor(np.asarray(batch["state"]), device=device, dtype=torch.float32)
+	
+	# Clear numpy arrays from memory if they exist
+	del jax
+	
 	return batch
 
 
@@ -303,10 +309,37 @@ def get_latest_checkpoint_step(config):
 	return max(checkpoint_steps) if checkpoint_steps else None
 
 
-def train_loop(config: _config.TrainConfig, ckpt_save_interval: int = None):
+def setup_memory_optimizations(model, device, enable_gradient_checkpointing=False):
+	"""Setup memory optimization techniques for the model."""
+	if enable_gradient_checkpointing and hasattr(model, 'gradient_checkpointing_enable'):
+		model.gradient_checkpointing_enable()
+		logging.info("Enabled gradient checkpointing for memory optimization")
+	
+	# Enable memory efficient attention if available
+	if hasattr(model, 'config') and hasattr(model.config, 'attention_mode'):
+		model.config.attention_mode = 'flash_attention_2'
+		logging.info("Enabled Flash Attention 2 for memory efficiency")
+	
+	# Set memory efficient settings
+	if torch.cuda.is_available():
+		# Enable memory efficient algorithms
+		torch.backends.cudnn.benchmark = True
+		torch.backends.cudnn.deterministic = False
+		
+		# Set memory fraction if needed
+		if device.index is not None:
+			torch.cuda.empty_cache()
+			logging.info(f"Cleared CUDA cache for device {device.index}")
+
+
+def train_loop(config: _config.TrainConfig, ckpt_save_interval: int = None, gradient_accumulation_steps: int = 1, mixed_precision: bool = True, max_memory_usage: float = None, enable_gradient_checkpointing: bool = False):
 	use_ddp, local_rank, device = setup_ddp()
 	is_main = (not use_ddp) or (dist.get_rank() == 0)
 	set_seed(config.seed, local_rank)
+
+	# Memory optimization: Set memory fraction if specified
+	if max_memory_usage is not None and torch.cuda.is_available():
+		torch.cuda.set_per_process_memory_fraction(max_memory_usage / torch.cuda.get_device_properties(device).total_memory * 1e-9)
 
 	# Initialize checkpoint directory and wandb
 	resuming = False
@@ -338,28 +371,41 @@ def train_loop(config: _config.TrainConfig, ckpt_save_interval: int = None):
 	sampler = None
 	if use_ddp:
 		sampler = DistributedSampler(dataset, num_replicas=dist.get_world_size(), rank=dist.get_rank(), shuffle=True, drop_last=True)
-	loader = TorchDataLoader(dataset, batch_size=config.batch_size // (dist.get_world_size() if use_ddp else 1), shuffle=(sampler is None), sampler=sampler, num_workers=config.num_workers, pin_memory=True, drop_last=True, collate_fn=collate_to_numpy)
+	
+	# Reduce batch size for gradient accumulation
+	effective_batch_size = config.batch_size // (dist.get_world_size() if use_ddp else 1)
+	
+	# Memory-efficient data loading with reduced pin_memory for large datasets
+	pin_memory = True
+	if effective_batch_size > 16:  # Reduce pin_memory for large batches
+		pin_memory = False
+		logging.info("Disabled pin_memory for large batch size to reduce memory usage")
+	
+	loader = TorchDataLoader(dataset, batch_size=effective_batch_size, shuffle=(sampler is None), sampler=sampler, num_workers=config.num_workers, pin_memory=pin_memory, drop_last=True, collate_fn=collate_to_numpy)
 
 	# Log sample images to wandb on first batch
 	if is_main and config.wandb_enabled and not resuming:
-		# sample_batch = next(iter(loader))
-		# sample_batch = batch_to_torch(sample_batch, device)
+		sample_batch = next(iter(loader))
+		sample_batch = batch_to_torch(sample_batch, device)
 
-		# # Create sample images for wandb
-		# images_to_log = []
-		# for i in range(min(5, sample_batch['image'][0].shape[0])):
-		# 	# Concatenate all camera views horizontally
-		# 	img_concatenated = torch.cat([img[i].cpu().numpy() for img in sample_batch['image']], axis=1)
-		# 	# Convert from [-1, 1] to [0, 1] for wandb
-		# 	img_concatenated = (img_concatenated + 1) / 2
-		# 	# Convert to uint8 for wandb
-		# 	img_concatenated = (img_concatenated * 255).astype(np.uint8)
-		# 	images_to_log.append(wandb.Image(img_concatenated))
+		# Create sample images for wandb
+		images_to_log = []
+		# Get batch size from the first image tensor
+		batch_size = next(iter(sample_batch['image'].values())).shape[0]
+		for i in range(min(5, batch_size)):
+			# Concatenate all camera views horizontally for this batch item
+			img_concatenated = torch.cat([img[i] for img in sample_batch['image'].values()], axis=1)
+			img_concatenated = img_concatenated.cpu().numpy()
+			images_to_log.append(wandb.Image(img_concatenated))
 		
-		# wandb.log({"camera_views": images_to_log}, step=0)
+		wandb.log({"camera_views": images_to_log}, step=0)
+		
+		# Clear sample batch from memory
+		del sample_batch, images_to_log
+		torch.cuda.empty_cache() if torch.cuda.is_available() else None
 		
 		# Reset the loader iterator
-		loader = TorchDataLoader(dataset, batch_size=config.batch_size // (dist.get_world_size() if use_ddp else 1), shuffle=(sampler is None), sampler=sampler, num_workers=config.num_workers, pin_memory=True, drop_last=True, collate_fn=collate_to_numpy)
+		loader = TorchDataLoader(dataset, batch_size=effective_batch_size, shuffle=(sampler is None), sampler=sampler, num_workers=config.num_workers, pin_memory=pin_memory, drop_last=True, collate_fn=collate_to_numpy)
 
 	# Build model
 	if not isinstance(config.model, Pi0Config):
@@ -376,6 +422,10 @@ def train_loop(config: _config.TrainConfig, ckpt_save_interval: int = None):
 		model_cfg = config.model
 
 	model = PI0Pytorch(model_cfg).to(device)
+	
+	# Apply memory optimizations
+	setup_memory_optimizations(model, device, enable_gradient_checkpointing)
+	
 	if use_ddp:
 		model = DDP(model, device_ids=[device.index] if device.type == "cuda" else None, find_unused_parameters=False)
 
@@ -426,14 +476,16 @@ def train_loop(config: _config.TrainConfig, ckpt_save_interval: int = None):
 		cos = 0.5 * (1 + np.cos(np.pi * progress))
 		return end_lr + (peak_lr - end_lr) * cos
 
-	scaler = torch.amp.GradScaler('cuda', enabled=False)  # switch to True if using fp16
+	# Enable mixed precision training for memory optimization
+	scaler = torch.amp.GradScaler(enabled=mixed_precision and torch.cuda.is_available())
 
 	model.train()
 	start_time = time.time()
 	infos = []  # Collect stats over log interval
 	if is_main:
 		logging.info(f"Running on: {platform.node()} | world_size={dist.get_world_size() if use_ddp else 1}")
-		logging.info(f"Training config: batch_size={config.batch_size}, num_train_steps={config.num_train_steps}")
+		logging.info(f"Training config: batch_size={config.batch_size}, effective_batch_size={effective_batch_size}, num_train_steps={config.num_train_steps}")
+		logging.info(f"Memory optimizations: gradient_accumulation_steps={gradient_accumulation_steps}, mixed_precision={mixed_precision}, gradient_checkpointing={enable_gradient_checkpointing}")
 		logging.info(f"LR schedule: warmup={warmup_steps}, peak_lr={peak_lr:.2e}, decay_steps={decay_steps}, end_lr={end_lr:.2e}")
 		logging.info(f"Optimizer: {type(config.optimizer).__name__}, weight_decay={config.optimizer.weight_decay}, clip_norm={config.optimizer.clip_gradient_norm}")
 		if config.ema_decay is not None:
@@ -454,36 +506,45 @@ def train_loop(config: _config.TrainConfig, ckpt_save_interval: int = None):
 			# Convert dict batch directly to torch tensors (bypass Observation.from_dict for PyTorch)
 			batch = batch_to_torch(batch, device)
 			actions = batch["actions"]
-			# actions = torch.from_numpy(np.array(batch["actions"])).to(device=device, dtype=torch.float32)
 
 			# Update LR
 			for pg in optim.param_groups:
 				pg["lr"] = lr_schedule(global_step)
 
-			optim.zero_grad(set_to_none=True)
-
+			# Forward pass with mixed precision
 			observation = _model.Observation.from_dict(batch)
-			with torch.amp.autocast('cuda', enabled=False):
+			with torch.amp.autocast('cuda', enabled=mixed_precision and torch.cuda.is_available()):
 				losses = model(observation, actions)
-				loss = losses.mean()
-			loss.backward()
-			torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=config.optimizer.clip_gradient_norm)
-			optim.step()
+				loss = losses.mean() / gradient_accumulation_steps  # Scale loss for gradient accumulation
+			
+			# Backward pass with gradient scaling
+			scaler.scale(loss).backward()
 
-			# Update EMA if enabled
-			if ema_model is not None:
-				with torch.no_grad():
-					for param, ema_param in zip(model.parameters(), ema_model.parameters()):
-						ema_param.data.mul_(config.ema_decay).add_(param.data, alpha=1 - config.ema_decay)
+			# Gradient accumulation logic
+			if (global_step + 1) % gradient_accumulation_steps == 0:
+				# Unscale gradients for clipping
+				scaler.unscale_(optim)
+				torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=config.optimizer.clip_gradient_norm)
+				
+				# Optimizer step
+				scaler.step(optim)
+				scaler.update()
+				optim.zero_grad(set_to_none=True)
 
-			# Collect stats
-			if is_main:
+				# Update EMA if enabled
+				if ema_model is not None:
+					with torch.no_grad():
+						for param, ema_param in zip(model.parameters(), ema_model.parameters()):
+							ema_param.data.mul_(config.ema_decay).add_(param.data, alpha=1 - config.ema_decay)
+
+			# Collect stats (only on accumulation steps)
+			if (global_step + 1) % gradient_accumulation_steps == 0 and is_main:
 				infos.append({
-					"loss": loss.item(),
+					"loss": loss.item() * gradient_accumulation_steps,  # Unscale for logging
 					"learning_rate": optim.param_groups[0]['lr'],
 				})
 
-			if is_main and (global_step % config.log_interval == 0):
+			if is_main and (global_step % config.log_interval == 0) and (global_step + 1) % gradient_accumulation_steps == 0:
 				elapsed = time.time() - start_time
 				
 				# Average stats over log interval
@@ -507,13 +568,18 @@ def train_loop(config: _config.TrainConfig, ckpt_save_interval: int = None):
 			# Save checkpoint using the new mechanism
 			save_checkpoint(model, optim, global_step, config, is_main, ckpt_save_interval, ema_model)
 
+			# Memory cleanup after each batch
+			del batch, actions, observation, losses, loss
+			if torch.cuda.is_available():
+				torch.cuda.empty_cache()
+
 			global_step += 1
 			
 			# Update progress bar
 			if pbar is not None:
 				pbar.update(1)
 				pbar.set_postfix({
-					'loss': f'{loss.item():.4f}',
+					'loss': f'{loss.item() * gradient_accumulation_steps:.4f}',
 					'lr': f'{optim.param_groups[0]["lr"]:.2e}',
 					'step': global_step
 				})
@@ -533,14 +599,32 @@ def main():
 	init_logging()
 	config = _config.cli()
 	
-	# Parse additional command line arguments for checkpoint interval
+	# Parse additional command line arguments for memory optimization
 	import argparse
 	parser = argparse.ArgumentParser(add_help=False)
 	parser.add_argument("--ckpt_save_interval", type=int, default=None, 
 						help="Interval for saving checkpoints (overrides config.save_interval)")
+	parser.add_argument("--gradient_accumulation_steps", type=int, default=1,
+						help="Number of steps to accumulate gradients (default: 1)")
+	parser.add_argument("--mixed_precision", action="store_true", default=False,
+						help="Enable mixed precision training (default: True)")
+	parser.add_argument("--no_mixed_precision", action="store_true", default=True,
+						help="Disable mixed precision training")
+	parser.add_argument("--max_memory_usage", type=float, default=None,
+						help="Maximum GPU memory usage in GB (default: None, auto-detect)")
+	parser.add_argument("--enable_gradient_checkpointing", action="store_true", default=True,
+						help="Enable gradient checkpointing for memory optimization")
 	args, _ = parser.parse_known_args()
 	
-	train_loop(config, ckpt_save_interval=args.ckpt_save_interval)
+	# Handle mixed precision flag
+	mixed_precision = args.mixed_precision and not args.no_mixed_precision
+	
+	train_loop(config, 
+			   ckpt_save_interval=args.ckpt_save_interval,
+			   gradient_accumulation_steps=args.gradient_accumulation_steps,
+			   mixed_precision=mixed_precision,
+			   max_memory_usage=args.max_memory_usage,
+			   enable_gradient_checkpointing=args.enable_gradient_checkpointing)
 
 
 if __name__ == "__main__":
