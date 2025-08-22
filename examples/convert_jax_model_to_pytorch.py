@@ -8,10 +8,10 @@ This script loads a JAX model checkpoint using orbax and can either:
 
 Usage:
     # Just inspect keys:
-    python convert_jax_model_to_pytorch.py --checkpoint_dir /path/to/checkpoint --inspect_only
+    python examples/convert_jax_model_to_pytorch.py --checkpoint_dir /path/to/checkpoint --inspect_only
     
     # Convert to PyTorch:
-    python convert_jax_model_to_pytorch.py --checkpoint_dir /path/to/checkpoint --output_path /path/to/output
+    python examples/convert_jax_model_to_pytorch.py --checkpoint_dir /path/to/checkpoint --output_path /path/to/output
 
 Example:    
     # pi0_droid 
