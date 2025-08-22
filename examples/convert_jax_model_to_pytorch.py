@@ -536,6 +536,12 @@ def convert_pi0_checkpoint(checkpoint_dir: str, precision: str, output_path: str
             action_horizon=10,
             pi05=True,
         )
+    elif "pi05_base" in checkpoint_dir:
+        pi0_config = Pi0Config(
+            action_dim=32,
+            action_horizon=50,
+            pi05=True,
+        )
     else:
         pi0_config = openpi.models.pi0_config.Pi0Config(
             action_dim=8,
