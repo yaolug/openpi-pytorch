@@ -197,7 +197,7 @@ class Pi0(_model.BaseModel):
         time: at.Float[at.Array, "*b"] | None = None
     ) -> at.Float[at.Array, "*b ah"]:
         preprocess_rng, noise_rng, time_rng = jax.random.split(rng, 3)
-        #observation = _model.preprocess_observation(preprocess_rng, observation, train=train)
+        observation = _model.preprocess_observation(preprocess_rng, observation, train=train)
 
         batch_shape = actions.shape[:-2]
         # Use provided noise and time if available, otherwise generate them

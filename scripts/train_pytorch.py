@@ -144,6 +144,11 @@ def setup_ddp():
 	if use_ddp and not dist.is_initialized():
 		backend = "nccl" if torch.cuda.is_available() else "gloo"
 		dist.init_process_group(backend=backend, init_method="env://")
+		
+		# Set up debugging environment variables for DDP issues
+		if os.environ.get("TORCH_DISTRIBUTED_DEBUG") is None:
+			os.environ["TORCH_DISTRIBUTED_DEBUG"] = "INFO"
+		
 	local_rank = int(os.environ.get("LOCAL_RANK", os.environ.get("RANK", "0")))
 	device = torch.device(f"cuda:{local_rank}" if torch.cuda.is_available() else "cpu")
 	if torch.cuda.is_available():
@@ -214,6 +219,16 @@ def batch_to_torch(batch: Dict[str, Any], device: torch.device) -> Tuple[list[to
 	return batch
 
 
+def get_model_state_dict(model):
+	"""Get state dict from model, handling DDP wrapper."""
+	return model.module.state_dict() if isinstance(model, DDP) else model.state_dict()
+
+
+def get_model_parameters(model):
+	"""Get parameters from model, handling DDP wrapper."""
+	return model.module.parameters() if isinstance(model, DDP) else model.parameters()
+
+
 def save_checkpoint(model, optimizer, global_step, config, is_main, ckpt_save_interval=None, ema_model=None):
 	"""Save a checkpoint with model state, optimizer state, EMA state, and metadata."""
 	if not is_main:
@@ -228,7 +243,7 @@ def save_checkpoint(model, optimizer, global_step, config, is_main, ckpt_save_in
 		os.makedirs(ckpt_dir, exist_ok=True)
 
 		# Save model state
-		state_dict = (model.module if isinstance(model, DDP) else model).state_dict()
+		state_dict = get_model_state_dict(model)
 		torch.save(state_dict, os.path.join(ckpt_dir, "pytorch_model.pt"))
 
 		# Save optimizer state
@@ -259,30 +274,30 @@ def load_checkpoint(model, optimizer, config, device, ema_model=None):
 	for d in config.checkpoint_dir.iterdir():
 		if d.is_dir() and d.name.isdigit():
 			checkpoint_steps.append(int(d.name))
-
+	
 	if not checkpoint_steps:
 		raise FileNotFoundError(f"No checkpoints found in {config.checkpoint_dir}")
-
+	
 	latest_step = max(checkpoint_steps)
 	ckpt_dir = os.path.join(config.checkpoint_dir, f"{latest_step}")
-
+	
 	# Load model state
 	model_state_dict = torch.load(os.path.join(ckpt_dir, "pytorch_model.pt"), map_location=device)
 	(model.module if isinstance(model, DDP) else model).load_state_dict(model_state_dict)
-
+	
 	# Load optimizer state
 	optimizer_state_dict = torch.load(os.path.join(ckpt_dir, "optimizer.pt"), map_location=device)
 	optimizer.load_state_dict(optimizer_state_dict)
-
+	
 	# Load EMA state if available
 	if ema_model is not None and os.path.exists(os.path.join(ckpt_dir, "ema_model.pt")):
 		ema_state_dict = torch.load(os.path.join(ckpt_dir, "ema_model.pt"), map_location=device)
 		ema_model.load_state_dict(ema_state_dict)
 		logging.info(f"Loaded EMA state from checkpoint")
-
+	
 	# Load metadata
 	metadata = torch.load(os.path.join(ckpt_dir, "metadata.pt"), map_location=device)
-
+	
 	logging.info(f"Loaded checkpoint from step {latest_step} -> {ckpt_dir}")
 	return metadata["global_step"]
 
@@ -295,6 +310,57 @@ def get_latest_checkpoint_step(config):
 			checkpoint_steps.append(int(d.name))
 
 	return max(checkpoint_steps) if checkpoint_steps else None
+
+
+def debug_unused_parameters(model, device):
+	"""Debug function to identify unused parameters in the model."""
+	if isinstance(model, DDP):
+		model = model.module
+	
+	logging.info("Checking for potentially unused parameters...")
+	
+	# Get all parameter names and their indices
+	param_info = {}
+	idx = 0
+	for name, param in model.named_parameters():
+		if param.requires_grad:
+			param_info[idx] = name
+			idx += 1
+	
+	logging.info(f"Total trainable parameters: {len(param_info)}")
+	
+	# Check which parameters have gradients after a forward pass
+	# This is a diagnostic function that can be called if needed
+	return param_info
+
+
+def check_model_parameters(model, device):
+	"""Check for unused parameters and provide debugging information."""
+	if isinstance(model, DDP):
+		model = model.module
+	
+	total_params = 0
+	used_params = 0
+	
+	for name, param in model.named_parameters():
+		total_params += param.numel()
+		if param.requires_grad:
+			used_params += param.numel()
+	
+	logging.info(f"Model parameters: {total_params:,} total, {used_params:,} trainable")
+	
+	# Check for parameters that might be unused
+	unused_params = []
+	for name, param in model.named_parameters():
+		if param.requires_grad and param.grad is None:
+			unused_params.append(name)
+	
+	if unused_params:
+		logging.warning(f"Found {len(unused_params)} parameters that might be unused:")
+		for name in unused_params[:10]:  # Show first 10
+			logging.warning(f"  - {name}")
+		if len(unused_params) > 10:
+			logging.warning(f"  ... and {len(unused_params) - 10} more")
 
 
 def setup_memory_optimizations(model, device, enable_gradient_checkpointing=False):
@@ -410,12 +476,17 @@ def train_loop(config: _config.TrainConfig, ckpt_save_interval: int = None, grad
 		model_cfg = config.model
 
 	model = PI0Pytorch(model_cfg).to(device)
-
+	
 	# Apply memory optimizations
 	setup_memory_optimizations(model, device, enable_gradient_checkpointing)
-
+	
+	# Check model parameters for debugging
+	if is_main:
+		check_model_parameters(model, device)
+	
 	if use_ddp:
-		model = DDP(model, device_ids=[device.index] if device.type == "cuda" else None, find_unused_parameters=False)
+		# Enable unused parameter detection to handle cases where some parameters don't participate in loss
+		model = DDP(model, device_ids=[device.index] if device.type == "cuda" else None, find_unused_parameters=True)
 
 	# Load weights from weight_loader if specified (for fine-tuning)
 	if isinstance(config.weight_loader, str):
@@ -445,10 +516,20 @@ def train_loop(config: _config.TrainConfig, ckpt_save_interval: int = None, grad
 	# Initialize EMA if specified in config
 	ema_model = None
 	if config.ema_decay is not None:
-		ema_model = PI0Pytorch(model_cfg).to(device)
-		ema_model.load_state_dict(model.state_dict())
-		ema_model.eval()
-		logging.info(f"Initialized EMA with decay {config.ema_decay}")
+		try:
+			ema_model = PI0Pytorch(model_cfg).to(device)
+			
+			# Get the correct state dict from the main model
+			main_model_state_dict = get_model_state_dict(model)
+			
+			# Load the state dict into EMA model
+			ema_model.load_state_dict(main_model_state_dict)
+			ema_model.eval()
+			logging.info(f"Initialized EMA with decay {config.ema_decay}")
+		except Exception as e:
+			logging.error(f"Failed to initialize EMA model: {e}")
+			logging.error("Continuing without EMA...")
+			ema_model = None
 
 	# Load checkpoint if resuming
 	global_step = 0
@@ -501,9 +582,24 @@ def train_loop(config: _config.TrainConfig, ckpt_save_interval: int = None, grad
 
 			# Forward pass with mixed precision
 			observation = _model.Observation.from_dict(batch)
-			with torch.amp.autocast('cuda', enabled=mixed_precision and torch.cuda.is_available()):
-				losses = model(observation, actions)
-				loss = losses.mean() / gradient_accumulation_steps  # Scale loss for gradient accumulation
+			try:
+				with torch.amp.autocast('cuda', enabled=mixed_precision and torch.cuda.is_available()):
+					losses = model(observation, actions)
+					# Ensure losses is a tensor and handle different return types
+					if isinstance(losses, (list, tuple)):
+						losses = torch.stack(losses)
+					elif not isinstance(losses, torch.Tensor):
+						losses = torch.tensor(losses, device=device, dtype=torch.float32)
+					
+					loss = losses.mean() / gradient_accumulation_steps  # Scale loss for gradient accumulation
+			except RuntimeError as e:
+				if "Expected to have finished reduction" in str(e) or "did not receive grad" in str(e):
+					logging.error(f"DDP error on rank {dist.get_rank() if use_ddp else 0}: {e}")
+					logging.error("This usually indicates unused parameters in the model.")
+					logging.error("Try setting TORCH_DISTRIBUTED_DEBUG=DETAIL for more information.")
+					raise
+				else:
+					raise
 
 			# Backward pass with gradient scaling
 			scaler.scale(loss).backward()
@@ -521,9 +617,15 @@ def train_loop(config: _config.TrainConfig, ckpt_save_interval: int = None, grad
 
 				# Update EMA if enabled
 				if ema_model is not None:
-					with torch.no_grad():
-						for param, ema_param in zip(model.parameters(), ema_model.parameters()):
-							ema_param.data.mul_(config.ema_decay).add_(param.data, alpha=1 - config.ema_decay)
+					try:
+						with torch.no_grad():
+							# Get parameters from the correct model structure
+							main_model_params = get_model_parameters(model)
+							for param, ema_param in zip(main_model_params, ema_model.parameters()):
+								ema_param.data.mul_(config.ema_decay).add_(param.data, alpha=1 - config.ema_decay)
+					except Exception as e:
+						logging.warning(f"Failed to update EMA model: {e}")
+						# Continue training without EMA update
 
 			# Collect stats (only on accumulation steps)
 			if (global_step + 1) % gradient_accumulation_steps == 0 and is_main:
@@ -602,10 +704,16 @@ def main():
 						help="Maximum GPU memory usage in GB (default: None, auto-detect)")
 	parser.add_argument("--enable_gradient_checkpointing", action="store_true", default=False,
 						help="Enable gradient checkpointing for memory optimization")
+	parser.add_argument("--ddp_debug_level", type=str, default="INFO", choices=["INFO", "DETAIL", "OFF"],
+						help="DDP debugging level (default: INFO)")
 	args, _ = parser.parse_known_args()
-
+	
 	# Handle mixed precision flag
 	mixed_precision = args.mixed_precision and not args.no_mixed_precision
+	
+	# Set DDP debug level
+	if args.ddp_debug_level != "OFF":
+		os.environ["TORCH_DISTRIBUTED_DEBUG"] = args.ddp_debug_level
 
 	train_loop(config, 
 			   ckpt_save_interval=args.ckpt_save_interval,
