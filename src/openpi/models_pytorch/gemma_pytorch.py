@@ -55,7 +55,8 @@ class PaliGemmaWithExpertModel(nn.Module):
         vlm_config_hf.vision_config.intermediate_size = 4304
         vlm_config_hf.vision_config.projection_dim = 2048
         vlm_config_hf.vision_config.projector_hidden_act = "gelu_fast"
-        vlm_config_hf.vision_config.torch_dtype = "float32"
+        vlm_config_hf.vision_config.torch_dtype = "bfloat16"
+        vlm_config_hf.vision_config._attn_implementation = "flash_attention_2"
 
         action_expert_config_hf = CONFIG_MAPPING["gemma"](
             head_dim=action_expert_config.head_dim,
@@ -135,7 +136,38 @@ class PaliGemmaWithExpertModel(nn.Module):
         else:
             models = [self.paligemma.language_model, self.gemma_expert.model]
             num_layers = self.paligemma.config.text_config.num_hidden_layers
-            for layer_idx in range(num_layers):
+            
+            # Check if gradient checkpointing is enabled for any of the models
+            use_gradient_checkpointing = (
+                hasattr(self.gemma_expert.model, 'gradient_checkpointing') and 
+                self.gemma_expert.model.gradient_checkpointing and 
+                self.training
+            ) or (
+                hasattr(self, 'gradient_checkpointing') and 
+                self.gradient_checkpointing and 
+                self.training
+            )
+            
+            # Force enable gradient checkpointing if we're in training mode and the model supports it
+            if self.training and hasattr(self.gemma_expert.model, 'gradient_checkpointing'):
+                if not self.gemma_expert.model.gradient_checkpointing:
+                    print("Forcing gradient checkpointing to be enabled for Gemma expert model")
+                    self.gemma_expert.model.gradient_checkpointing = True
+                use_gradient_checkpointing = True
+            
+            # Debug gradient checkpointing status
+            if hasattr(self, '_debug_gc_printed') and not self._debug_gc_printed:
+                print(f"Gemma expert model gradient checkpointing: {use_gradient_checkpointing}")
+                print(f"Model training mode: {self.training}")
+                print(f"Gemma expert model has gradient_checkpointing attr: {hasattr(self.gemma_expert.model, 'gradient_checkpointing')}")
+                if hasattr(self.gemma_expert.model, 'gradient_checkpointing'):
+                    print(f"Gemma expert model gradient_checkpointing value: {self.gemma_expert.model.gradient_checkpointing}")
+                self._debug_gc_printed = True
+            
+            # Define the complete layer computation function for gradient checkpointing
+            def compute_layer_complete(layer_idx, inputs_embeds, attention_mask, position_ids, adarms_cond):
+                models = [self.paligemma.language_model, self.gemma_expert.model]
+                
                 query_states = []
                 key_states = []
                 value_states = []
@@ -143,9 +175,6 @@ class PaliGemmaWithExpertModel(nn.Module):
                 for i, hidden_states in enumerate(inputs_embeds):
                     layer = models[i].layers[layer_idx]
                     hidden_states, gate = layer.input_layernorm(hidden_states, cond=adarms_cond[i])
-                    # hidden_states = hidden_states.to(dtype=torch.bfloat16)
-                    # if gate is not None:
-                    #     gate = gate.to(dtype=torch.bfloat16)
                     gates.append(gate)
 
                     input_shape = hidden_states.shape[:-1]
@@ -158,18 +187,10 @@ class PaliGemmaWithExpertModel(nn.Module):
                     key_states.append(key_state)
                     value_states.append(value_state)
 
-                # B,L,H,D with L sequence length, H number of heads, D head dim
-                # concatenate on the number of embeddings/tokens
+                # Concatenate and process attention
                 query_states = torch.cat(query_states, dim=2)
                 key_states = torch.cat(key_states, dim=2)
                 value_states = torch.cat(value_states, dim=2)
-
-                # query_states = apply_rope(query_states, position_ids)
-                # key_states = apply_rope(key_states, position_ids)
-
-                # query_states = query_states.transpose(1, 2)
-                # key_states = key_states.transpose(1, 2)
-                # value_states = value_states.transpose(1, 2)
 
                 dummy_tensor = torch.zeros(query_states.shape[0], query_states.shape[2], query_states.shape[-1], device=query_states.device, dtype=query_states.dtype)
                 cos, sin = self.paligemma.model.language_model.rotary_emb(dummy_tensor, position_ids)
@@ -177,23 +198,25 @@ class PaliGemmaWithExpertModel(nn.Module):
 
                 batch_size = query_states.shape[0]
                 scaling = self.paligemma.language_model.layers[layer_idx].self_attn.scaling
+                
+                # Attention computation
                 att_output, _ = modeling_gemma.eager_attention_forward(
                     self.paligemma.language_model.layers[layer_idx].self_attn, query_states, key_states, value_states, attention_mask, scaling
                 )
-                #att_output = att_output.to(dtype=torch.bfloat16)
-                att_output = att_output.reshape(batch_size, -1, 1 * 8 * layer.self_attn.head_dim)
+                # Get head_dim from the current layer, not from the model
+                head_dim = self.paligemma.language_model.layers[layer_idx].self_attn.head_dim
+                att_output = att_output.reshape(batch_size, -1, 1 * 8 * head_dim)
 
-
-                # first part of att_output is prefix (up to sequence length, [:, 0:prefix_seq_len])
+                # Process layer outputs
                 outputs_embeds = []
-                start = 0
+                start_pos = 0
                 for i, hidden_states in enumerate(inputs_embeds):
                     layer = models[i].layers[layer_idx]
-                    end = start + hidden_states.shape[1]
+                    end_pos = start_pos + hidden_states.shape[1]
 
                     if att_output.dtype != layer.self_attn.o_proj.weight.dtype:
                         att_output = att_output.to(layer.self_attn.o_proj.weight.dtype)
-                    out_emb = layer.self_attn.o_proj(att_output[:, start:end])                    
+                    out_emb = layer.self_attn.o_proj(att_output[:, start_pos:end_pos])                    
 
                     # first residual
                     out_emb = modeling_gemma._gated_residual(hidden_states, out_emb, gates[i])
@@ -205,14 +228,43 @@ class PaliGemmaWithExpertModel(nn.Module):
                     # second residual
                     out_emb = modeling_gemma._gated_residual(after_first_residual, out_emb, gate)
                     outputs_embeds.append(out_emb)
-                    start = end
-                inputs_embeds = outputs_embeds
+                    start_pos = end_pos
+                
+                return outputs_embeds
+
+            # Process all layers with gradient checkpointing if enabled
+            for layer_idx in range(num_layers):
+                if use_gradient_checkpointing:
+                    inputs_embeds = torch.utils.checkpoint.checkpoint(
+                        compute_layer_complete,
+                        layer_idx, inputs_embeds, attention_mask, position_ids, adarms_cond,
+                        use_reentrant=False,
+                        preserve_rng_state=False
+                    )
+                else:
+                    inputs_embeds = compute_layer_complete(layer_idx, inputs_embeds, attention_mask, position_ids, adarms_cond)
+
+                # Old code removed - now using compute_layer_complete function above
 
             # final norm
-            outputs_embeds = []
-            for i, hidden_states in enumerate(inputs_embeds):
-                out_emb, _ = models[i].norm(hidden_states, cond=adarms_cond[i])
-                outputs_embeds.append(out_emb)
+            # Define final norm computation function for gradient checkpointing
+            def compute_final_norms(inputs_embeds, adarms_cond):
+                outputs_embeds = []
+                for i, hidden_states in enumerate(inputs_embeds):
+                    out_emb, _ = models[i].norm(hidden_states, cond=adarms_cond[i])
+                    outputs_embeds.append(out_emb)
+                return outputs_embeds
+            
+            # Apply gradient checkpointing to final norm if enabled
+            if use_gradient_checkpointing:
+                outputs_embeds = torch.utils.checkpoint.checkpoint(
+                    compute_final_norms,
+                    inputs_embeds, adarms_cond,
+                    use_reentrant=False,
+                    preserve_rng_state=False
+                )
+            else:
+                outputs_embeds = compute_final_norms(inputs_embeds, adarms_cond)
 
             prefix_output = outputs_embeds[0]
             suffix_output = outputs_embeds[1]
