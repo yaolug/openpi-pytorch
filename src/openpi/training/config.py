@@ -746,7 +746,7 @@ _CONFIGS = [
             base_config=DataConfig(prompt_from_task=True),
             extra_delta_transform=False,
         ),
-        batch_size=64,
+        batch_size=256,
         lr_schedule=_optimizer.CosineDecaySchedule(
             warmup_steps=10_000,
             peak_lr=5e-5,
@@ -756,7 +756,7 @@ _CONFIGS = [
         optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
         ema_decay=0.999,
         weight_loader="/home/jasonlu/.cache/openpi/openpi-assets-preview/checkpoints/pi05_base_pytorch2",
-        num_train_steps=30_000,
+        num_train_steps=60_000,
     ),
     #
     # Fine-tuning Aloha configs.

@@ -56,11 +56,13 @@ Environment Variables for Multi-Node:
 Checkpoint Parameters:
 - --ckpt_save_interval: Override the checkpoint save interval from config (e.g., --save_interval 500)
 - --resume: Resume training from the latest checkpoint in the checkpoint directory
+- --cleanup_checkpoints: Clean up corrupted checkpoints during resume (keeps last 3 valid ones)
 - --overwrite: Overwrite existing checkpoint directory (cannot be used with --resume)
 Memory Optimization Parameters:
 - --gradient_accumulation_steps: Number of steps to accumulate gradients (default: 1)
 - --mixed_precision: Enable mixed precision training (default: True)
 - --max_memory_usage: Maximum GPU memory usage in GB (default: None, auto-detect)
+- --gradckpt: Enable gradient checkpointing for memory optimization
 Notes
 - The global batch size must be divisible by world size (number of processes).
 - The data pipeline and transforms are identical to the JAX version and are controlled
@@ -80,6 +82,7 @@ import logging
 import os
 import platform
 import time
+import gc
 from dataclasses import dataclass
 from typing import Any, Dict, Tuple
 
@@ -287,25 +290,49 @@ def load_checkpoint(model, optimizer, checkpoint_dir, device, ema_model=None):
 	latest_step = max(checkpoint_steps)
 	ckpt_dir = checkpoint_dir / f"{latest_step}"
 	
-	# Load model state
-	model_state_dict = torch.load(ckpt_dir / "pytorch_model.pt", map_location=device)
-	(model.module if isinstance(model, DDP) else model).load_state_dict(model_state_dict)
+	# Load model state with error handling
+	try:
+		model_state_dict = torch.load(ckpt_dir / "pytorch_model.pt", map_location=device, weights_only=False)
+		(model.module if isinstance(model, DDP) else model).load_state_dict(model_state_dict)
+		logging.info(f"Successfully loaded model state from step {latest_step}")
+	except Exception as e:
+		logging.error(f"Failed to load model state from step {latest_step}: {e}")
+		raise RuntimeError(f"Model checkpoint corrupted at step {latest_step}. Cannot resume training.")
 	
-	# Load optimizer state
-	optimizer_state_dict = torch.load(ckpt_dir / "optimizer.pt", map_location=device)
-	optimizer.load_state_dict(optimizer_state_dict)
+	# Load optimizer state with error handling and fallback
+	optimizer_loaded = False
+	try:
+		optimizer_state_dict = torch.load(ckpt_dir / "optimizer.pt", map_location=device, weights_only=False)
+		optimizer.load_state_dict(optimizer_state_dict)
+		optimizer_loaded = True
+		logging.info(f"Successfully loaded optimizer state from step {latest_step}")
+	except Exception as e:
+		logging.warning(f"Failed to load optimizer state from step {latest_step}: {e}")
+		logging.warning("Optimizer state corrupted. Will continue with fresh optimizer state.")
+		# Reset optimizer to fresh state
+		for param_group in optimizer.param_groups:
+			param_group['lr'] = param_group.get('lr', 1e-4)  # Use default LR or current LR
+		optimizer.zero_grad()
+		optimizer_loaded = False
 	
 	# Load EMA state if available
+	ema_loaded = False
 	if ema_model is not None and (ckpt_dir / "ema_model.pt").exists():
-		ema_state_dict = torch.load(ckpt_dir / "ema_model.pt", map_location=device)
-		ema_model.load_state_dict(ema_state_dict)
-		logging.info(f"Loaded EMA state from checkpoint")
+		try:
+			ema_state_dict = torch.load(ckpt_dir / "ema_model.pt", map_location=device, weights_only=False)
+			ema_model.load_state_dict(ema_state_dict)
+			ema_loaded = True
+			logging.info(f"Successfully loaded EMA state from step {latest_step}")
+		except Exception as e:
+			logging.warning(f"Failed to load EMA state from step {latest_step}: {e}")
+			logging.warning("EMA state corrupted. Will continue without EMA.")
+			ema_loaded = False
 	
 	# Load metadata (weights_only=False needed for older checkpoints that might contain JAX/Flax objects)
 	try:
 		metadata = torch.load(ckpt_dir / "metadata.pt", map_location=device, weights_only=False)
 		global_step = metadata.get("global_step", latest_step)
-		logging.info(f"Loaded checkpoint from step {latest_step} -> {ckpt_dir}")
+		logging.info(f"Successfully loaded metadata from step {latest_step}")
 		return global_step
 	except Exception as e:
 		logging.warning(f"Failed to load metadata from checkpoint: {e}")
@@ -321,6 +348,110 @@ def get_latest_checkpoint_step(checkpoint_dir):
 			checkpoint_steps.append(int(d.name))
 
 	return max(checkpoint_steps) if checkpoint_steps else None
+
+
+def validate_checkpoint_integrity(checkpoint_dir, step):
+	"""Validate that a checkpoint at the given step is complete and uncorrupted."""
+	ckpt_dir = checkpoint_dir / f"{step}"
+	
+	required_files = ["pytorch_model.pt", "optimizer.pt", "metadata.pt"]
+	optional_files = ["ema_model.pt"]
+	
+	# Check if all required files exist
+	for file_name in required_files:
+		file_path = ckpt_dir / file_name
+		if not file_path.exists():
+			logging.warning(f"Required checkpoint file missing: {file_path}")
+			return False
+	
+	# Try to validate file integrity by attempting to load them
+	try:
+		# Test model file
+		device = torch.device("cpu")  # Use CPU for validation to avoid GPU memory issues
+		model_state = torch.load(ckpt_dir / "pytorch_model.pt", map_location=device, weights_only=False)
+		if not isinstance(model_state, dict):
+			logging.warning(f"Model checkpoint file corrupted at step {step}")
+			return False
+		
+		# Test optimizer file
+		optimizer_state = torch.load(ckpt_dir / "optimizer.pt", map_location=device, weights_only=False)
+		if not isinstance(optimizer_state, dict):
+			logging.warning(f"Optimizer checkpoint file corrupted at step {step}")
+			return False
+		
+		# Test metadata file
+		metadata = torch.load(ckpt_dir / "metadata.pt", map_location=device, weights_only=False)
+		if not isinstance(metadata, dict) or "global_step" not in metadata:
+			logging.warning(f"Metadata checkpoint file corrupted at step {step}")
+			return False
+		
+		logging.info(f"Checkpoint at step {step} validated successfully")
+		return True
+		
+	except Exception as e:
+		logging.warning(f"Checkpoint validation failed at step {step}: {e}")
+		return False
+
+
+def find_latest_valid_checkpoint(checkpoint_dir):
+	"""Find the latest checkpoint that passes integrity validation."""
+	checkpoint_steps = []
+	for d in checkpoint_dir.iterdir():
+		if d.is_dir() and d.name.isdigit():
+			checkpoint_steps.append(int(d.name))
+	
+	if not checkpoint_steps:
+		return None
+	
+	# Sort steps in descending order to check latest first
+	checkpoint_steps.sort(reverse=True)
+	
+	for step in checkpoint_steps:
+		if validate_checkpoint_integrity(checkpoint_dir, step):
+			return step
+	
+	logging.error("No valid checkpoints found in directory")
+	return None
+
+
+def cleanup_corrupted_checkpoints(checkpoint_dir, keep_last_n=3):
+	"""Clean up corrupted checkpoints, keeping only the last N valid ones."""
+	checkpoint_steps = []
+	for d in checkpoint_dir.iterdir():
+		if d.is_dir() and d.name.isdigit():
+			checkpoint_steps.append(int(d.name))
+	
+	if not checkpoint_steps:
+		return
+	
+	# Sort steps in descending order
+	checkpoint_steps.sort(reverse=True)
+	
+	valid_checkpoints = []
+	corrupted_checkpoints = []
+	
+	# Validate all checkpoints
+	for step in checkpoint_steps:
+		if validate_checkpoint_integrity(checkpoint_dir, step):
+			valid_checkpoints.append(step)
+		else:
+			corrupted_checkpoints.append(step)
+	
+	# Keep only the last N valid checkpoints
+	checkpoints_to_keep = valid_checkpoints[:keep_last_n]
+	checkpoints_to_remove = valid_checkpoints[keep_last_n:] + corrupted_checkpoints
+	
+	# Remove old valid checkpoints and all corrupted ones
+	for step in checkpoints_to_remove:
+		checkpoint_path = checkpoint_dir / f"{step}"
+		try:
+			import shutil
+			shutil.rmtree(checkpoint_path)
+			logging.info(f"Removed checkpoint at step {step}")
+		except Exception as e:
+			logging.warning(f"Failed to remove checkpoint at step {step}: {e}")
+	
+	logging.info(f"Checkpoint cleanup complete. Kept {len(checkpoints_to_keep)} valid checkpoints: {checkpoints_to_keep}")
 
 
 def debug_unused_parameters(model, device):
@@ -368,14 +499,41 @@ def check_model_parameters(model, device):
 	
 	if unused_params:
 		logging.warning(f"Found {len(unused_params)} parameters that might be unused:")
-		for name in unused_params[:10]:  # Show first 10
+		for name in unused_params:  # Show first 10
 			logging.warning(f"  - {name}")
-		if len(unused_params) > 10:
-			logging.warning(f"  ... and {len(unused_params) - 10} more")
+		# if len(unused_params) > 10:
+		# 	logging.warning(f"  ... and {len(unused_params) - 10} more")
+
+
+def log_memory_usage(device, step, phase="unknown"):
+	"""Log detailed memory usage information."""
+	if not torch.cuda.is_available():
+		return
+	
+	memory_allocated = torch.cuda.memory_allocated(device) / 1e9
+	memory_reserved = torch.cuda.memory_reserved(device) / 1e9
+	memory_free = torch.cuda.memory_reserved(device) - torch.cuda.memory_allocated(device)
+	memory_free = memory_free / 1e9
+	
+	# Get more detailed memory info
+	memory_stats = torch.cuda.memory_stats(device)
+	max_memory_allocated = memory_stats.get('allocated_bytes.all.peak', 0) / 1e9
+	max_memory_reserved = memory_stats.get('reserved_bytes.all.peak', 0) / 1e9
+	
+	# Get DDP info if available
+	ddp_info = ""
+	if dist.is_initialized():
+		ddp_info = f" | DDP: rank={dist.get_rank()}, world_size={dist.get_world_size()}"
+	
+	logging.info(f"Step {step} ({phase}): GPU memory - allocated: {memory_allocated:.2f}GB, reserved: {memory_reserved:.2f}GB, free: {memory_free:.2f}GB, peak_allocated: {max_memory_allocated:.2f}GB, peak_reserved: {max_memory_reserved:.2f}GB{ddp_info}")
 
 
 def setup_memory_optimizations(model, device, enable_gradient_checkpointing=False):
 	"""Setup memory optimization techniques for the model."""
+	# Set memory optimization environment variables
+	os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
+	os.environ["CUDA_LAUNCH_BLOCKING"] = "0"
+	
 	if enable_gradient_checkpointing and hasattr(model, 'gradient_checkpointing_enable'):
 		model.gradient_checkpointing_enable()
 		logging.info("Enabled gradient checkpointing for memory optimization")
@@ -388,16 +546,18 @@ def setup_memory_optimizations(model, device, enable_gradient_checkpointing=Fals
 	# Set memory efficient settings
 	if torch.cuda.is_available():
 		# Enable memory efficient algorithms
-		torch.backends.cudnn.benchmark = True
-		torch.backends.cudnn.deterministic = False
+		torch.backends.cudnn.benchmark = False  # Disable for memory efficiency
+		torch.backends.cudnn.deterministic = True  # Enable for memory efficiency
 
 		# Set memory fraction if needed
 		if device.index is not None:
 			torch.cuda.empty_cache()
 			logging.info(f"Cleared CUDA cache for device {device.index}")
+			
+		logging.info("Set PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True to reduce memory fragmentation")
 
 
-def train_loop(config: _config.TrainConfig, resume: bool = False, ckpt_save_interval: int = None, gradient_accumulation_steps: int = 1, mixed_precision: bool = True, max_memory_usage: float = None, enable_gradient_checkpointing: bool = False):
+def train_loop(config: _config.TrainConfig, resume: bool = False, ckpt_save_interval: int = None, gradient_accumulation_steps: int = 1, mixed_precision: bool = True, max_memory_usage: float = None, enable_gradient_checkpointing: bool = False, cleanup_checkpoints: bool = False):
 	use_ddp, local_rank, device = setup_ddp()
 	is_main = (not use_ddp) or (dist.get_rank() == 0)
 	set_seed(config.seed, local_rank)
@@ -412,12 +572,18 @@ def train_loop(config: _config.TrainConfig, resume: bool = False, ckpt_save_inte
 		# Find checkpoint directory based on experiment name
 		exp_checkpoint_dir = config.checkpoint_dir
 		if exp_checkpoint_dir.exists():
-			latest_step = get_latest_checkpoint_step(exp_checkpoint_dir)
+			# Use validation to find the latest working checkpoint
+			latest_step = find_latest_valid_checkpoint(exp_checkpoint_dir)
 			if latest_step is not None:
 				resuming = True
 				logging.info(f"Resuming from experiment checkpoint directory: {exp_checkpoint_dir} at step {latest_step}")
+				
+				# Clean up corrupted checkpoints if requested
+				if cleanup_checkpoints and is_main:
+					logging.info("Cleaning up corrupted checkpoints...")
+					cleanup_corrupted_checkpoints(exp_checkpoint_dir, keep_last_n=3)
 			else:
-				raise FileNotFoundError(f"No checkpoints found in {exp_checkpoint_dir} for resume")
+				raise FileNotFoundError(f"No valid checkpoints found in {exp_checkpoint_dir} for resume")
 		else:
 			raise FileNotFoundError(f"Experiment checkpoint directory {exp_checkpoint_dir} does not exist for resume")
 	elif config.overwrite and config.checkpoint_dir.exists():
@@ -449,10 +615,8 @@ def train_loop(config: _config.TrainConfig, resume: bool = False, ckpt_save_inte
 	effective_batch_size = config.batch_size // (dist.get_world_size() if use_ddp else 1)
 
 	# Memory-efficient data loading with reduced pin_memory for large datasets
-	pin_memory = True
-	if effective_batch_size > 16:  # Reduce pin_memory for large batches
-		pin_memory = False
-		logging.info("Disabled pin_memory for large batch size to reduce memory usage")
+	pin_memory = False  # Disable pin_memory to reduce memory usage
+	logging.info("Disabled pin_memory to reduce memory usage")
 
 	loader = TorchDataLoader(dataset, batch_size=effective_batch_size, shuffle=(sampler is None), sampler=sampler, num_workers=config.num_workers, pin_memory=pin_memory, drop_last=True, collate_fn=collate_to_numpy)
 
@@ -480,6 +644,8 @@ def train_loop(config: _config.TrainConfig, resume: bool = False, ckpt_save_inte
 		# Reset the loader iterator
 		loader = TorchDataLoader(dataset, batch_size=effective_batch_size, shuffle=(sampler is None), sampler=sampler, num_workers=config.num_workers, pin_memory=pin_memory, drop_last=True, collate_fn=collate_to_numpy)
 
+	# Test gradient checkpointing with a small forward pass (moved to after model creation)
+
 	# Build model
 	if not isinstance(config.model, Pi0Config):
 		# Convert dataclass to Pi0Config if needed
@@ -499,17 +665,77 @@ def train_loop(config: _config.TrainConfig, resume: bool = False, ckpt_save_inte
 	# Apply memory optimizations
 	setup_memory_optimizations(model, device, enable_gradient_checkpointing)
 	
+	# Log initial memory usage after model creation
+	if is_main and torch.cuda.is_available():
+		log_memory_usage(device, 0, "after_model_creation")
+	
 	# Log gradient checkpointing status if enabled
 	if enable_gradient_checkpointing and is_main:
 		if hasattr(model, 'get_gradient_checkpointing_status'):
 			status = model.get_gradient_checkpointing_status()
 			logging.info(f"Gradient checkpointing status: {status}")
+			
+			# Verify that gradient checkpointing is actually enabled
+			if hasattr(model, 'is_gradient_checkpointing_enabled'):
+				is_enabled = model.is_gradient_checkpointing_enabled()
+				logging.info(f"Gradient checkpointing is enabled: {is_enabled}")
+				
+				# Check if we're in training mode
+				logging.info(f"Model training mode: {model.training}")
+				
+				# Verify the underlying models have gradient checkpointing enabled
+				if hasattr(model, 'paligemma_with_expert'):
+					if hasattr(model.paligemma_with_expert, 'paligemma'):
+						if hasattr(model.paligemma_with_expert.paligemma, 'language_model'):
+							paligemma_gc = getattr(model.paligemma_with_expert.paligemma.language_model, 'gradient_checkpointing', False)
+							logging.info(f"PaliGemma language model gradient checkpointing: {paligemma_gc}")
+						
+						if hasattr(model.paligemma_with_expert.paligemma, 'vision_tower'):
+							vision_gc = getattr(model.paligemma_with_expert.paligemma.vision_tower, 'gradient_checkpointing', False)
+							logging.info(f"PaliGemma vision tower gradient checkpointing: {vision_gc}")
+					
+					if hasattr(model.paligemma_with_expert, 'gemma_expert'):
+						if hasattr(model.paligemma_with_expert.gemma_expert, 'model'):
+							gemma_gc = getattr(model.paligemma_with_expert.gemma_expert.model, 'gradient_checkpointing', False)
+							logging.info(f"Gemma expert model gradient checkpointing: {gemma_gc}")
 		else:
 			logging.info("Gradient checkpointing enabled but status check not available")
 	
-	# Check model parameters for debugging
-	if is_main:
-		check_model_parameters(model, device)
+	# Test gradient checkpointing with a small forward pass
+	if is_main and enable_gradient_checkpointing:
+		logging.info("Testing gradient checkpointing with a small forward pass...")
+		try:
+			# Create a small test batch
+			test_batch = next(iter(loader))
+			test_batch = batch_to_torch(test_batch, device)
+			test_actions = test_batch["actions"]
+			
+			# Record memory before forward pass
+			if torch.cuda.is_available():
+				memory_before = torch.cuda.memory_allocated(device) / 1e9
+				logging.info(f"Memory before test forward pass: {memory_before:.2f}GB")
+			
+			# Do a test forward pass
+			with torch.no_grad():
+				test_observation = _model.Observation.from_dict(test_batch)
+				test_losses = model(test_observation, test_actions)
+			
+			# Record memory after forward pass
+			if torch.cuda.is_available():
+				memory_after = torch.cuda.memory_allocated(device) / 1e9
+				logging.info(f"Memory after test forward pass: {memory_after:.2f}GB")
+				logging.info(f"Memory difference: {memory_after - memory_before:.2f}GB")
+			
+			# Clear test data
+			del test_batch, test_actions, test_observation, test_losses
+			if torch.cuda.is_available():
+				torch.cuda.empty_cache()
+				gc.collect()
+			
+			logging.info("Gradient checkpointing test completed successfully")
+		except Exception as e:
+			logging.warning(f"Gradient checkpointing test failed: {e}")
+			logging.warning("Continuing with training...")
 	
 	if use_ddp:
 		# Enable unused parameter detection to handle cases where some parameters don't participate in loss
@@ -574,6 +800,17 @@ def train_loop(config: _config.TrainConfig, resume: bool = False, ckpt_save_inte
 
 	# Enable mixed precision training for memory optimization
 	scaler = torch.amp.GradScaler(enabled=mixed_precision and torch.cuda.is_available())
+	
+	# Set memory efficient settings
+	if torch.cuda.is_available():
+		# Enable memory efficient algorithms
+		torch.backends.cudnn.benchmark = False  # Disable for memory efficiency
+		torch.backends.cudnn.deterministic = True  # Enable for memory efficiency
+		
+		# Set memory fraction if needed
+		if device.index is not None:
+			torch.cuda.empty_cache()
+			logging.info(f"Cleared CUDA cache for device {device.index}")
 
 	model.train()
 	start_time = time.time()
@@ -589,6 +826,9 @@ def train_loop(config: _config.TrainConfig, resume: bool = False, ckpt_save_inte
 
 	# Training loop - iterate until we reach num_train_steps
 	pbar = tqdm(total=config.num_train_steps, initial=global_step, desc="Training", disable=not is_main) if is_main else None
+
+	# Check model parameters after first few steps when gradients are available
+	parameters_checked = False
 
 	while global_step < config.num_train_steps:
 		if use_ddp:
@@ -619,6 +859,14 @@ def train_loop(config: _config.TrainConfig, resume: bool = False, ckpt_save_inte
 						losses = torch.tensor(losses, device=device, dtype=torch.float32)
 					
 					loss = losses.mean() / gradient_accumulation_steps  # Scale loss for gradient accumulation
+					
+					# Debug gradient checkpointing on first few steps
+					if global_step < 5 and is_main:
+						if hasattr(model, 'is_gradient_checkpointing_enabled'):
+							gc_enabled = model.is_gradient_checkpointing_enabled()
+							logging.info(f"Step {global_step}: Gradient checkpointing enabled: {gc_enabled}")
+							if torch.cuda.is_available():
+								log_memory_usage(device, global_step, "after_forward")
 			except RuntimeError as e:
 				if "Expected to have finished reduction" in str(e) or "did not receive grad" in str(e):
 					logging.error(f"DDP error on rank {dist.get_rank() if use_ddp else 0}: {e}")
@@ -630,6 +878,16 @@ def train_loop(config: _config.TrainConfig, resume: bool = False, ckpt_save_inte
 
 			# Backward pass with gradient scaling
 			scaler.scale(loss).backward()
+			
+			# Aggressive memory cleanup after backward pass
+			if torch.cuda.is_available():
+				# Clear intermediate activations that might still be in memory
+				torch.cuda.empty_cache()
+				gc.collect()
+				
+				# Log memory usage after backward pass for debugging
+				if global_step < 5 and is_main:
+					log_memory_usage(device, global_step, "after_backward")
 
 			# Gradient accumulation logic
 			if (global_step + 1) % gradient_accumulation_steps == 0:
@@ -641,6 +899,12 @@ def train_loop(config: _config.TrainConfig, resume: bool = False, ckpt_save_inte
 				scaler.step(optim)
 				scaler.update()
 				optim.zero_grad(set_to_none=True)
+				
+				# Clear gradients more aggressively
+				for param in model.parameters():
+					if param.grad is not None:
+						param.grad.detach_()
+						param.grad = None
 
 				# Update EMA if enabled
 				if ema_model is not None:
@@ -653,6 +917,11 @@ def train_loop(config: _config.TrainConfig, resume: bool = False, ckpt_save_inte
 					except Exception as e:
 						logging.warning(f"Failed to update EMA model: {e}")
 						# Continue training without EMA update
+
+			# # Check model parameters after first few steps when gradients are available
+			# if not parameters_checked and global_step >= 16510 and is_main:
+			# 	check_model_parameters(model, device)
+			# 	parameters_checked = True
 
 			# Collect stats (only on accumulation steps)
 			if (global_step + 1) % gradient_accumulation_steps == 0 and is_main:
@@ -671,7 +940,7 @@ def train_loop(config: _config.TrainConfig, resume: bool = False, ckpt_save_inte
 				logging.info(f"step={global_step} loss={avg_loss:.4f} lr={avg_lr:.2e} time={elapsed:.1f}s")
 
 				# Log to wandb
-				if config.wandb_enabled:
+				if config.wandb_enabled and len(infos) > 1:
 					wandb.log({
 						"loss": avg_loss,
 						"learning_rate": avg_lr,
@@ -698,8 +967,18 @@ def train_loop(config: _config.TrainConfig, resume: bool = False, ckpt_save_inte
             
 			# Memory cleanup after each batch
 			del batch, actions, observation, losses, loss
+			
+			# More aggressive memory cleanup
 			if torch.cuda.is_available():
 				torch.cuda.empty_cache()
+				# Force garbage collection
+				gc.collect()
+				
+				# Log memory usage for debugging gradient checkpointing
+				if is_main and global_step % 100 == 0:
+					memory_allocated = torch.cuda.memory_allocated(device) / 1e9
+					memory_reserved = torch.cuda.memory_reserved(device) / 1e9
+					logging.info(f"Step {global_step}: GPU memory allocated: {memory_allocated:.2f}GB, reserved: {memory_reserved:.2f}GB")
 
 	# Close progress bar
 	if pbar is not None:
@@ -721,6 +1000,8 @@ def main():
 	parser = argparse.ArgumentParser(add_help=False)
 	parser.add_argument("--resume", action="store_true", default=False,
 						help="Resume training from the latest checkpoint for the experiment (handles both PyTorch and JAX checkpoints)")
+	parser.add_argument("--cleanup_checkpoints", action="store_true", default=False,
+						help="Clean up corrupted checkpoints during resume (keeps last 3 valid checkpoints)")
 	parser.add_argument("--ckpt_save_interval", type=int, default=None, 
 						help="Interval for saving checkpoints (overrides config.save_interval)")
 	parser.add_argument("--gradient_accumulation_steps", type=int, default=1,
@@ -750,7 +1031,8 @@ def main():
 			   gradient_accumulation_steps=args.gradient_accumulation_steps,
 			   mixed_precision=mixed_precision,
 			   max_memory_usage=args.max_memory_usage,
-			   enable_gradient_checkpointing=args.gradckpt)
+			   enable_gradient_checkpointing=True,
+			   cleanup_checkpoints=args.cleanup_checkpoints)
 
 
 if __name__ == "__main__":

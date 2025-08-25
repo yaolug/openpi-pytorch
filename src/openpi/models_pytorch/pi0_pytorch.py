@@ -119,14 +119,19 @@ class PI0Pytorch(nn.Module):
         if hasattr(self.paligemma_with_expert, 'paligemma'):
             if hasattr(self.paligemma_with_expert.paligemma, 'language_model'):
                 self.paligemma_with_expert.paligemma.language_model.gradient_checkpointing = True
-                logging.info("Enabled gradient checkpointing in PaliGemma language model")
+                print("Enabled gradient checkpointing in PaliGemma language model")
+            
+            # Enable gradient checkpointing in the vision model (SigLIP)
+            if hasattr(self.paligemma_with_expert.paligemma, 'vision_tower'):
+                self.paligemma_with_expert.paligemma.vision_tower.gradient_checkpointing = True
+                print("Enabled gradient checkpointing in PaliGemma vision tower (SigLIP)")
         
         if hasattr(self.paligemma_with_expert, 'gemma_expert'):
             if hasattr(self.paligemma_with_expert.gemma_expert, 'model'):
                 self.paligemma_with_expert.gemma_expert.model.gradient_checkpointing = True
-                logging.info("Enabled gradient checkpointing in Gemma expert model")
+                print("Enabled gradient checkpointing in Gemma expert model")
         
-        logging.info("Enabled gradient checkpointing for PI0Pytorch model")
+        print("Enabled gradient checkpointing for PI0Pytorch model")
 
     def gradient_checkpointing_disable(self):
         """Disable gradient checkpointing."""
@@ -136,6 +141,10 @@ class PI0Pytorch(nn.Module):
         if hasattr(self.paligemma_with_expert, 'paligemma'):
             if hasattr(self.paligemma_with_expert.paligemma, 'language_model'):
                 self.paligemma_with_expert.paligemma.language_model.gradient_checkpointing = False
+            
+            # Disable gradient checkpointing in the vision model (SigLIP)
+            if hasattr(self.paligemma_with_expert.paligemma, 'vision_tower'):
+                self.paligemma_with_expert.paligemma.vision_tower.gradient_checkpointing = False
         
         if hasattr(self.paligemma_with_expert, 'gemma_expert'):
             if hasattr(self.paligemma_with_expert.gemma_expert, 'model'):
@@ -152,6 +161,7 @@ class PI0Pytorch(nn.Module):
         status = {
             'main_model': self.gradient_checkpointing_enabled,
             'paligemma_language_model': False,
+            'paligemma_vision_model': False,
             'gemma_expert_model': False
         }
         
@@ -159,6 +169,13 @@ class PI0Pytorch(nn.Module):
             if hasattr(self.paligemma_with_expert.paligemma, 'language_model'):
                 status['paligemma_language_model'] = getattr(
                     self.paligemma_with_expert.paligemma.language_model, 
+                    'gradient_checkpointing', 
+                    False
+                )
+            
+            if hasattr(self.paligemma_with_expert.paligemma, 'vision_tower'):
+                status['paligemma_vision_model'] = getattr(
+                    self.paligemma_with_expert.paligemma.vision_tower, 
                     'gradient_checkpointing', 
                     False
                 )
@@ -198,25 +215,64 @@ class PI0Pytorch(nn.Module):
         pad_masks = []
         att_masks = []
         
-        for (
-            img,
-            img_mask,
-        ) in zip(images, img_masks):
-            img_emb = self.paligemma_with_expert.embed_image(img)
+        # Apply gradient checkpointing to image embedding if enabled
+        if self.gradient_checkpointing_enabled and self.training:
+            for (
+                img,
+                img_mask,
+            ) in zip(images, img_masks):
+                # Use checkpoint for image embedding
+                def checkpointed_image_embed(img):
+                    return self.paligemma_with_expert.embed_image(img)
+                
+                img_emb = torch.utils.checkpoint.checkpoint(
+                    checkpointed_image_embed,
+                    img,
+                    use_reentrant=False,
+                    preserve_rng_state=False
+                )
 
-            bsize, num_img_embs = img_emb.shape[:2]
-            img_mask = img_mask[:, None].expand(bsize, num_img_embs)
+                bsize, num_img_embs = img_emb.shape[:2]
+                img_mask = img_mask[:, None].expand(bsize, num_img_embs)
 
-            embs.append(img_emb)
-            pad_masks.append(img_mask)
+                embs.append(img_emb)
+                pad_masks.append(img_mask)
 
-            # Create attention masks so that image tokens attend to each other
-            att_masks += [0] * num_img_embs
+                # Create attention masks so that image tokens attend to each other
+                att_masks += [0] * num_img_embs
+        else:
+            for (
+                img,
+                img_mask,
+            ) in zip(images, img_masks):
+                img_emb = self.paligemma_with_expert.embed_image(img)
 
-        lang_emb = self.paligemma_with_expert.embed_language_tokens(lang_tokens)
+                bsize, num_img_embs = img_emb.shape[:2]
+                img_mask = img_mask[:, None].expand(bsize, num_img_embs)
 
-        lang_emb_dim = lang_emb.shape[-1]
-        lang_emb = lang_emb * math.sqrt(lang_emb_dim)
+                embs.append(img_emb)
+                pad_masks.append(img_mask)
+
+                # Create attention masks so that image tokens attend to each other
+                att_masks += [0] * num_img_embs
+
+        # Apply gradient checkpointing to language embedding if enabled
+        if self.gradient_checkpointing_enabled and self.training:
+            def checkpointed_lang_embed(lang_tokens):
+                lang_emb = self.paligemma_with_expert.embed_language_tokens(lang_tokens)
+                lang_emb_dim = lang_emb.shape[-1]
+                return lang_emb * math.sqrt(lang_emb_dim)
+            
+            lang_emb = torch.utils.checkpoint.checkpoint(
+                checkpointed_lang_embed,
+                lang_tokens,
+                use_reentrant=False,
+                preserve_rng_state=False
+            )
+        else:
+            lang_emb = self.paligemma_with_expert.embed_language_tokens(lang_tokens)
+            lang_emb_dim = lang_emb.shape[-1]
+            lang_emb = lang_emb * math.sqrt(lang_emb_dim)
 
         embs.append(lang_emb)
         pad_masks.append(lang_masks)
@@ -243,8 +299,20 @@ class PI0Pytorch(nn.Module):
         att_masks = []
 
         if not self.pi05:
-            # Embed state
-            state_emb = self.state_proj(state)
+            # Embed state with gradient checkpointing if enabled
+            if self.gradient_checkpointing_enabled and self.training:
+                def checkpointed_state_proj(state):
+                    return self.state_proj(state)
+                
+                state_emb = torch.utils.checkpoint.checkpoint(
+                    checkpointed_state_proj,
+                    state,
+                    use_reentrant=False,
+                    preserve_rng_state=False
+                )
+            else:
+                state_emb = self.state_proj(state)
+            
             embs.append(state_emb[:, None, :])
             bsize = state_emb.shape[0]
             dtype = state_emb.dtype
@@ -262,22 +330,66 @@ class PI0Pytorch(nn.Module):
         )
         time_emb = time_emb.type(dtype=timestep.dtype)
 
-        # Fuse timestep + action information using an MLP
-        action_emb = self.action_in_proj(noisy_actions)
+        # Fuse timestep + action information using an MLP with gradient checkpointing if enabled
+        if self.gradient_checkpointing_enabled and self.training:
+            def checkpointed_action_proj(noisy_actions):
+                return self.action_in_proj(noisy_actions)
+            
+            action_emb = torch.utils.checkpoint.checkpoint(
+                checkpointed_action_proj,
+                noisy_actions,
+                use_reentrant=False,
+                preserve_rng_state=False
+            )
+        else:
+            action_emb = self.action_in_proj(noisy_actions)
 
         if not self.pi05:
             time_emb = time_emb[:, None, :].expand_as(action_emb)
             action_time_emb = torch.cat([action_emb, time_emb], dim=2)
-            action_time_emb = self.action_time_mlp_in(action_time_emb)
-            action_time_emb = F.silu(action_time_emb)  # swish == silu
-            action_time_emb = self.action_time_mlp_out(action_time_emb)
+            
+            # Apply gradient checkpointing to MLP layers if enabled
+            if self.gradient_checkpointing_enabled and self.training:
+                def checkpointed_mlp(action_time_emb):
+                    x = self.action_time_mlp_in(action_time_emb)
+                    x = F.silu(x)  # swish == silu
+                    x = self.action_time_mlp_out(x)
+                    return x
+                
+                action_time_emb = torch.utils.checkpoint.checkpoint(
+                    checkpointed_mlp,
+                    action_time_emb,
+                    use_reentrant=False,
+                    preserve_rng_state=False
+                )
+            else:
+                action_time_emb = self.action_time_mlp_in(action_time_emb)
+                action_time_emb = F.silu(action_time_emb)  # swish == silu
+                action_time_emb = self.action_time_mlp_out(action_time_emb)
+            
             adarms_cond = None
         else:
-            # time MLP (for adaRMS)
-            time_emb = self.time_mlp_in(time_emb)
-            time_emb = F.silu(time_emb)  # swish == silu
-            time_emb = self.time_mlp_out(time_emb)
-            time_emb = F.silu(time_emb)
+            # time MLP (for adaRMS) with gradient checkpointing if enabled
+            if self.gradient_checkpointing_enabled and self.training:
+                def checkpointed_time_mlp(time_emb):
+                    x = self.time_mlp_in(time_emb)
+                    x = F.silu(x)  # swish == silu
+                    x = self.time_mlp_out(x)
+                    x = F.silu(x)
+                    return x
+                
+                time_emb = torch.utils.checkpoint.checkpoint(
+                    checkpointed_time_mlp,
+                    time_emb,
+                    use_reentrant=False,
+                    preserve_rng_state=False
+                )
+            else:
+                time_emb = self.time_mlp_in(time_emb)
+                time_emb = F.silu(time_emb)  # swish == silu
+                time_emb = self.time_mlp_out(time_emb)
+                time_emb = F.silu(time_emb)
+            
             action_time_emb = action_emb
             adarms_cond = time_emb
 
@@ -336,18 +448,52 @@ class PI0Pytorch(nn.Module):
         att_2d_masks_4d = att_2d_masks[:, None, :, :]
         att_2d_masks_4d = torch.where(att_2d_masks_4d, 0.0, -2.3819763e38)
 
-        (_, suffix_out), _ = self.paligemma_with_expert.forward(
-            attention_mask=att_2d_masks_4d,
-            position_ids=position_ids,
-            past_key_values=None,
-            inputs_embeds=[prefix_embs, suffix_embs],
-            use_cache=False,
-            adarms_cond=[None, adarms_cond]
-        )
+        # Apply gradient checkpointing if enabled
+        if self.gradient_checkpointing_enabled and self.training:
+            # Use torch.utils.checkpoint.checkpoint for the expensive forward pass
+            def checkpointed_forward(prefix_embs, suffix_embs, att_2d_masks_4d, position_ids, adarms_cond):
+                (_, suffix_out), _ = self.paligemma_with_expert.forward(
+                    attention_mask=att_2d_masks_4d,
+                    position_ids=position_ids,
+                    past_key_values=None,
+                    inputs_embeds=[prefix_embs, suffix_embs],
+                    use_cache=False,
+                    adarms_cond=[None, adarms_cond]
+                )
+                return suffix_out
+            
+            suffix_out = torch.utils.checkpoint.checkpoint(
+                checkpointed_forward,
+                prefix_embs, suffix_embs, att_2d_masks_4d, position_ids, adarms_cond,
+                use_reentrant=False,  # More memory efficient
+                preserve_rng_state=False  # More memory efficient
+            )
+        else:
+            (_, suffix_out), _ = self.paligemma_with_expert.forward(
+                attention_mask=att_2d_masks_4d,
+                position_ids=position_ids,
+                past_key_values=None,
+                inputs_embeds=[prefix_embs, suffix_embs],
+                use_cache=False,
+                adarms_cond=[None, adarms_cond]
+            )
+        
         suffix_out = suffix_out[:, -self.config.action_horizon :]
         suffix_out = suffix_out.to(dtype=torch.float32)
 
-        v_t = self.action_out_proj(suffix_out)
+        # Apply gradient checkpointing to final action projection if enabled
+        if self.gradient_checkpointing_enabled and self.training:
+            def checkpointed_action_out_proj(suffix_out):
+                return self.action_out_proj(suffix_out)
+            
+            v_t = torch.utils.checkpoint.checkpoint(
+                checkpointed_action_out_proj,
+                suffix_out,
+                use_reentrant=False,
+                preserve_rng_state=False
+            )
+        else:
+            v_t = self.action_out_proj(suffix_out)
 
         losses = F.mse_loss(u_t, v_t, reduction="none")
         return losses
