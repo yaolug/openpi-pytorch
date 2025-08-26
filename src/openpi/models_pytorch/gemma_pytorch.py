@@ -55,8 +55,8 @@ class PaliGemmaWithExpertModel(nn.Module):
         vlm_config_hf.vision_config.intermediate_size = 4304
         vlm_config_hf.vision_config.projection_dim = 2048
         vlm_config_hf.vision_config.projector_hidden_act = "gelu_fast"
-        vlm_config_hf.vision_config.torch_dtype = "bfloat16"
-        vlm_config_hf.vision_config._attn_implementation = "flash_attention_2"
+        vlm_config_hf.vision_config.torch_dtype = "float32"
+        # vlm_config_hf.vision_config._attn_implementation = "flash_attention_2"
 
         action_expert_config_hf = CONFIG_MAPPING["gemma"](
             head_dim=action_expert_config.head_dim,
