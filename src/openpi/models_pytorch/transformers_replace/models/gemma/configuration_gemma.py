@@ -81,6 +81,10 @@ class GemmaConfig(PretrainedConfig):
             Whether to use a bias in the query, key, value and output projection layers during self-attention.
         attention_dropout (`float`, *optional*, defaults to 0.0):
             The dropout ratio for the attention probabilities.
+        use_adarms (`bool`, *optional*, defaults to `False`):
+            Whether to use ADARMS.
+        adarms_cond_dim (`int`, *optional*, defaults to `None`):
+            The dimension of the ADARMS condition.
     ```python
     >>> from transformers import GemmaModel, GemmaConfig
     >>> # Initializing a Gemma gemma-7b style configuration

@@ -5,42 +5,24 @@ Example script showing how to run inference with both JAX and PyTorch Pi0 models
 This demonstrates the basic usage patterns for both implementations.
 
 pi0_droid
-python inference_example.py --model_name pi0_droid --jax_checkpoint_dir /home/jasonlu/.cache/openpi/openpi-assets/checkpoints/pi0_droid --pytorch_checkpoint_dir /home/jasonlu/.cache/openpi/openpi-assets/checkpoints/pi0_droid_pytorch2
+python examples/inference_example.py --model_name pi0_droid --jax_checkpoint_dir /home/jasonlu/.cache/openpi/openpi-assets/checkpoints/pi0_droid --pytorch_checkpoint_dir /home/jasonlu/.cache/openpi/openpi-assets/checkpoints/pi0_droid_pytorch
 
 pi0_aloha_sim
-python inference_example.py --model_name pi0_aloha_sim --jax_checkpoint_dir /home/jasonlu/.cache/openpi/openpi-assets/checkpoints/pi0_aloha_sim --pytorch_checkpoint_dir /home/jasonlu/.cache/openpi/openpi-assets/checkpoints/pi0_aloha_sim_pytorch2
+python examples/inference_example.py --model_name pi0_aloha_sim --jax_checkpoint_dir /home/jasonlu/.cache/openpi/openpi-assets/checkpoints/pi0_aloha_sim --pytorch_checkpoint_dir /home/jasonlu/.cache/openpi/openpi-assets/checkpoints/pi0_aloha_sim_pytorch
 
-pi05
-python inference_example.py --model_name pi05_droid --jax_checkpoint_dir /home/jasonlu/.cache/openpi/openpi-assets-preview/checkpoints/pi05_droid --pytorch_checkpoint_dir /home/jasonlu/.cache/openpi/openpi-assets-preview/checkpoints/pi05_droid_pytorch2
+pi05_droid
+python examples/inference_example.py --model_name pi05_droid --jax_checkpoint_dir /home/jasonlu/.cache/openpi/openpi-assets-preview/checkpoints/pi05_droid --pytorch_checkpoint_dir /home/jasonlu/.cache/openpi/openpi-assets-preview/checkpoints/pi05_droid_pytorch
 
 """
-
-import os
-os.environ['TORCH_COMPILE_DEBUG'] = '0'
-os.environ.pop("TORCH_LOGS", None)
-os.environ.pop("TORCH_COMPILE_DEBUG", None)
-os.environ.pop("TORCHDYNAMO_VERBOSE", None)
-os.environ.pop("TRITON_DEBUG", None)
-import logging
-logging.getLogger("torch._dynamo").setLevel(logging.WARNING)
-logging.getLogger("torch._inductor").setLevel(logging.WARNING)
-import torch
-torch._inductor.config.debug = False
-torch._inductor.config.verbose_progress = False
-
-# also make sure the older config flags aren’t printing
-import torch._dynamo.config as dcfg
-dcfg.verbose = False
-
-
-
 import argparse
 import numpy as np
+
 import jax
 import jax.numpy as jnp
-from openpi.policies import policy_config as _policy_config
-from openpi.training import config as _config
-import time
+import torch
+
+import openpi.policies.policy_config
+import openpi.training.config
 
 
 def create_example_data(model_name: str = "pi0_aloha_sim") -> dict:
@@ -105,84 +87,19 @@ def create_example_data(model_name: str = "pi0_aloha_sim") -> dict:
     return example
 
 
-
-def _print_jax_model_weights(policy) -> None:
-    """Print all JAX model weights (keys, shapes, dtypes)."""
-    try:
-        from flax import nnx
-        import flax.traverse_util as traverse_util
-    except Exception as e:
-        print(f"Could not import flax to print JAX weights: {e}")
-        return
-
-    try:
-        _, state = nnx.split(policy._model)
-        pure = state.to_pure_dict()
-        flat = traverse_util.flatten_dict(pure, sep="/")
-        print("\n=== JAX Model Weights ===")
-        for key, value in flat.items():
-            try:
-                arr = np.asarray(value)
-                if arr.size > 0:
-                    first = arr.flat[0]
-                    try:
-                        first_val = first
-                    except Exception:
-                        first_val = float(first)
-                    print(f"{key}: first={first_val.item()} dtype={first_val.dtype}")
-                else:
-                    print(f"{key}: first=<empty>")
-            except Exception:
-                print(f"{key}: first=<unavailable>")
-    except Exception as e:
-        print(f"Failed to print JAX model weights: {e}")
-
-
-def _print_pytorch_model_weights(policy) -> None:
-    """Print all PyTorch model weights (keys, shapes, dtypes)."""
-    try:
-        import torch
-    except Exception as e:
-        print(f"Could not import torch to print PyTorch weights: {e}")
-        return
-
-    try:
-        state_dict = policy._model.state_dict()
-        print("\n=== PyTorch Model Weights ===")
-        for name, tensor in state_dict.items():
-            try:
-                if tensor.numel() > 0:
-                    first_val = tensor.view(-1)[0]
-                    print(f"{name}: first={first_val} dtype={first_val.dtype}")
-
-                    if "action" in name or "state" in name:
-                        print(f"{name}: tensor={first_val.to(torch.float16).to(torch.float32)}")
-                        print(f"{name}: tensor={first_val.to(torch.bfloat16).to(torch.float32)}")
-                else:
-                    print(f"{name}: first=<empty>")
-            except Exception:
-                print(f"{name}: first=<unavailable>")
-    except Exception as e:
-        print(f"Failed to print PyTorch model weights: {e}")
-
-
 def run_jax_inference_example(observation, model_name, checkpoint_dir):
     """Example of running inference with JAX Pi0 model."""
     print("=== JAX Pi0 Inference Example ===")
 
     try:
         import jax
+        import openpi.models.pi0_config
+        import openpi.policies.policy
 
-        from openpi.models.pi0_config import Pi0Config
-        from openpi.policies.policy import Policy
-
-        config = _config.get_config(model_name)
+        config = openpi.training.config.get_config(model_name)
 
         # Create trained policy
-        policy = _policy_config.create_trained_policy(config, checkpoint_dir)
-
-        # Print all JAX weights
-        _print_jax_model_weights(policy)
+        policy = openpi.policies.policy_config.create_trained_policy(config, checkpoint_dir)
 
         rng_key = jax.random.key(42)
         noise_shape = (config.model.action_horizon, config.model.action_dim)  # Use model's expected dimension
@@ -205,22 +122,92 @@ def run_jax_inference_example(observation, model_name, checkpoint_dir):
         print(f"Failed to run JAX inference: {e}")
         return None
 
+
+def run_jax_inference_compare_jit(observation, model_name, checkpoint_dir):
+    """Run JAX inference both with JIT and without JIT, compare and time.
+
+    Returns (jitted_result, nojit_result, noise_np, jitted_time_s, nojit_time_s)
+    """
+    print("\n=== JAX JIT vs No-JIT Comparison ===")
+    try:
+        # Common config and RNG/noise
+        config = openpi.training.config.get_config(model_name)
+        rng_key = jax.random.key(42)
+        noise_shape = (config.model.action_horizon, config.model.action_dim)
+        jax_noise = jax.random.normal(rng_key, noise_shape, dtype=jnp.float32)
+        noise_np = np.array(jax_noise)
+
+        # JIT policy
+        policy_jit = openpi.policies.policy_config.create_trained_policy(config, checkpoint_dir)
+        policy_jit._rng = rng_key
+        # Warm-up with 5 inference calls
+        print("  Warming up JAX (JIT) with 5 inference calls...")
+        for _ in range(5):
+            _ = policy_jit.infer(observation, noise=noise_np)
+        
+        # Test inference with 5 calls and average timing
+        print("  Testing JAX (JIT) with 5 inference calls...")
+        jit_times = []
+        for i in range(5):
+            jitted_result = policy_jit.infer(observation, noise=noise_np)
+            jit_times.append(jitted_result["policy_timing"]["infer_ms"])
+        
+        jitted_time = np.mean(jit_times) / 1000.0  # Convert from ms to seconds
+        print(f"JAX (JIT) individual times: {[f'{t:.2f}ms' for t in jit_times]}")
+        print(f"JAX (JIT) average time: {jitted_time*1000:.2f} ms")
+
+        # No-JIT policy by bypassing jitted wrapper
+        policy_nojit = openpi.policies.policy_config.create_trained_policy(config, checkpoint_dir)
+        policy_nojit._rng = rng_key
+        # Force no-JIT path by using raw method
+        policy_nojit._sample_actions = policy_nojit._model.sample_actions
+        
+        # Run inference once (no warm-up needed for no-JIT)
+        print("  Running JAX (no-JIT) inference...")
+        nojit_result = policy_nojit.infer(observation, noise=noise_np)
+        nojit_time = nojit_result["policy_timing"]["infer_ms"] / 1000.0  # Convert from ms to seconds
+        print(f"JAX (no-JIT) time: {nojit_time*1000:.2f} ms")
+
+        # Compare outputs
+        actions_jit = jitted_result["actions"]
+        actions_nj = nojit_result["actions"]
+        diff = np.abs(actions_jit - actions_nj)
+        print("Actions comparison (JIT vs no-JIT):")
+        print(f"  - Max abs diff: {diff.max():.6f}")
+        print(f"  - Mean abs diff: {diff.mean():.6f}")
+        # Relative differences (relative to no-JIT)
+        rel_diff = np.abs((actions_jit - actions_nj) / actions_nj)
+        print(f"  - Max relative diff: {np.max(rel_diff):.6f}")
+        print(f"  - Mean relative diff: {np.mean(rel_diff):.6f}")
+        if np.allclose(actions_jit, actions_nj, rtol=1e-5, atol=1e-6):
+            print("  ✅ Match within strict tolerance")
+        elif np.allclose(actions_jit, actions_nj, rtol=1e-4, atol=1e-5):
+            print("  ⚠️  Match within moderate tolerance")
+        elif np.allclose(actions_jit, actions_nj, rtol=2e-2, atol=2e-3):
+            print("  ⚠️  Match within loose tolerance")
+        else:
+            print("  ❌ Significant difference")
+
+        return jitted_result, nojit_result, noise_np, jitted_time, nojit_time
+
+    except Exception as e:
+        print(f"Failed JAX JIT vs no-JIT comparison: {e}")
+        return None, None, None, None, None
+
+
 def run_pytorch_inference_example(observation, model_name, noise, checkpoint_dir):
     """Example of running inference with PyTorch Pi0 model."""
     print("\n=== PyTorch Pi0 Inference Example ===")
 
     try:
-        from openpi.models.pi0_config import Pi0Config
-        from openpi.models_pytorch.pi0_pytorch import PI0Pytorch
-        from openpi.policies.policy import Policy
+        import openpi.models.pi0_config
+        import openpi.models_pytorch.pi0_pytorch
+        import openpi.policies.policy
 
-        config = _config.get_config(model_name)
+        config = openpi.training.config.get_config(model_name)
 
         # Create trained policy
-        policy = _policy_config.create_trained_policy(config, checkpoint_dir)
-
-        # Print all PyTorch weights
-        # _print_pytorch_model_weights(policy)
+        policy = openpi.policies.policy_config.create_trained_policy(config, checkpoint_dir)
 
         # Warm-up with 5 inference calls
         print("Running PyTorch inference...")
@@ -295,78 +282,6 @@ def compare_results(jax_result, pytorch_result):
         print("❌ Results differ significantly even with loose tolerance!")
 
 
-def run_jax_inference_compare_jit(observation, model_name, checkpoint_dir):
-    """Run JAX inference both with JIT and without JIT, compare and time.
-
-    Returns (jitted_result, nojit_result, noise_np, jitted_time_s, nojit_time_s)
-    """
-    print("\n=== JAX JIT vs No-JIT Comparison ===")
-    try:
-        # Common config and RNG/noise
-        config = _config.get_config(model_name)
-        rng_key = jax.random.key(42)
-        noise_shape = (config.model.action_horizon, config.model.action_dim)
-        jax_noise = jax.random.normal(rng_key, noise_shape, dtype=jnp.float32)
-        noise_np = np.array(jax_noise)
-
-        # JIT policy
-        policy_jit = _policy_config.create_trained_policy(config, checkpoint_dir)
-        policy_jit._rng = rng_key
-        # Warm-up with 5 inference calls
-        print("  Warming up JAX (JIT) with 5 inference calls...")
-        for _ in range(5):
-            _ = policy_jit.infer(observation, noise=noise_np)
-        
-        # Test inference with 5 calls and average timing
-        print("  Testing JAX (JIT) with 5 inference calls...")
-        jit_times = []
-        for i in range(5):
-            jitted_result = policy_jit.infer(observation, noise=noise_np)
-            jit_times.append(jitted_result["policy_timing"]["infer_ms"])
-        
-        jitted_time = np.mean(jit_times) / 1000.0  # Convert from ms to seconds
-        print(f"JAX (JIT) individual times: {[f'{t:.2f}ms' for t in jit_times]}")
-        print(f"JAX (JIT) average time: {jitted_time*1000:.2f} ms")
-
-        # No-JIT policy by bypassing jitted wrapper
-        policy_nojit = _policy_config.create_trained_policy(config, checkpoint_dir)
-        policy_nojit._rng = rng_key
-        # Force no-JIT path by using raw method
-        policy_nojit._sample_actions = policy_nojit._model.sample_actions
-        
-        # Run inference once (no warm-up needed for no-JIT)
-        print("  Running JAX (no-JIT) inference...")
-        nojit_result = policy_nojit.infer(observation, noise=noise_np)
-        nojit_time = nojit_result["policy_timing"]["infer_ms"] / 1000.0  # Convert from ms to seconds
-        print(f"JAX (no-JIT) time: {nojit_time*1000:.2f} ms")
-
-        # Compare outputs
-        actions_jit = jitted_result["actions"]
-        actions_nj = nojit_result["actions"]
-        diff = np.abs(actions_jit - actions_nj)
-        print("Actions comparison (JIT vs no-JIT):")
-        print(f"  - Max abs diff: {diff.max():.6f}")
-        print(f"  - Mean abs diff: {diff.mean():.6f}")
-        # Relative differences (relative to no-JIT)
-        rel_diff = np.abs((actions_jit - actions_nj) / actions_nj)
-        print(f"  - Max relative diff: {np.max(rel_diff):.6f}")
-        print(f"  - Mean relative diff: {np.mean(rel_diff):.6f}")
-        if np.allclose(actions_jit, actions_nj, rtol=1e-5, atol=1e-6):
-            print("  ✅ Match within strict tolerance")
-        elif np.allclose(actions_jit, actions_nj, rtol=1e-4, atol=1e-5):
-            print("  ⚠️  Match within moderate tolerance")
-        elif np.allclose(actions_jit, actions_nj, rtol=2e-2, atol=2e-3):
-            print("  ⚠️  Match within loose tolerance")
-        else:
-            print("  ❌ Significant difference")
-
-        return jitted_result, nojit_result, noise_np, jitted_time, nojit_time
-
-    except Exception as e:
-        print(f"Failed JAX JIT vs no-JIT comparison: {e}")
-        return None, None, None, None, None
-
-
 def main():
     parser = argparse.ArgumentParser(description="Run inference with both JAX and PyTorch Pi0 models")
     parser.add_argument("--model_name", type=str, default="pi0_aloha_sim", 
@@ -387,13 +302,11 @@ def main():
 
     observation = create_example_data(args.model_name)
 
-
     # Compare JAX JIT vs no-JIT (and get noise for PyTorch)
     jax_jitted_result, jax_nojit_result, noise, jitted_time, nojit_time = run_jax_inference_compare_jit(
         observation, args.model_name, args.jax_checkpoint_dir
     )
 
-    import torch
     torch.cuda.empty_cache()
     # Run PyTorch inference with same noise as JAX
     pytorch_result, pytorch_time = run_pytorch_inference_example(observation, args.model_name, noise, args.pytorch_checkpoint_dir)

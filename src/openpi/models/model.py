@@ -12,9 +12,10 @@ from flax import struct
 from flax import traverse_util
 import jax
 import jax.numpy as jnp
+import logging
 import numpy as np
 import orbax.checkpoint as ocp
-from safetensors.torch import load_model
+import safetensors
 import torch
 
 from openpi.models_pytorch import pi0_pytorch
@@ -23,7 +24,7 @@ import openpi.shared.array_typing as at
 
 logger = logging.getLogger("openpi")
 
-ArrayT = TypeVar("ArrayT", at.Array, at.TorchTensor, jax.ShapeDtypeStruct)
+ArrayT = TypeVar("ArrayT", at.Array, jax.ShapeDtypeStruct)
 
 
 class ModelType(enum.Enum):
@@ -87,23 +88,23 @@ class Observation(Generic[ArrayT]):
     """
 
     # Images, in [-1, 1] float32.
-    images: dict[str, at.FloatOrTorch("*b h w c")]
+    images: dict[str, at.Float[ArrayT, "*b h w c"]]
     # Image masks, with same keys as images.
-    image_masks: dict[str, at.BoolOrTorch("*b")]
+    image_masks: dict[str, at.Bool[ArrayT, "*b"]]
     # Low-dimensional robot state.
-    state: at.FloatOrTorch("*b s")
+    state: at.Float[ArrayT, "*b s"]
 
     # Tokenized prompt.
-    tokenized_prompt: at.IntOrTorch("*b l") | None = None
+    tokenized_prompt: at.Int[ArrayT, "*b l"] | None = None
     # Tokenized prompt mask.
-    tokenized_prompt_mask: at.BoolOrTorch("*b l") | None = None
+    tokenized_prompt_mask: at.Bool[ArrayT, "*b l"] | None = None
 
     # pi0-fast model specific fields.
 
     # Token auto-regressive mask (for FAST autoregressive model).
-    token_ar_mask: at.IntOrTorch("*b l") | None = None
+    token_ar_mask: at.Int[ArrayT, "*b l"] | None = None
     # Token loss mask (for FAST autoregressive model).
-    token_loss_mask: at.BoolOrTorch("*b l") | None = None
+    token_loss_mask: at.Bool[ArrayT, "*b l"] | None = None
 
     @classmethod
     def from_dict(cls, data: at.PyTree[ArrayT]) -> "Observation[ArrayT]":
@@ -137,7 +138,7 @@ class Observation(Generic[ArrayT]):
 
 # Defines the format of the actions. This field is included as "actions" inside the dictionary
 # produced by the data transforms.
-Actions = at.FloatOrTorch("*b ah ad")
+Actions = at.Float[ArrayT, "*b ah ad"]
 
 
 def preprocess_observation(
@@ -240,9 +241,9 @@ class BaseModelConfig(abc.ABC):
         return nnx.merge(graphdef, state)
 
     def load_pytorch(self, train_config, weight_path: str):
-        print(f"train_config: {train_config}")
+        logger.info(f"train_config: {train_config}")
         model = pi0_pytorch.PI0Pytorch(config=train_config.model)
-        load_model(model, weight_path)
+        safetensors.torch.load_model(model, weight_path)
         return model
 
     @abc.abstractmethod

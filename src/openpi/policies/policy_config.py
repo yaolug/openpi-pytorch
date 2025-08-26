@@ -21,6 +21,7 @@ def create_trained_policy(
     sample_kwargs: dict[str, Any] | None = None,
     default_prompt: str | None = None,
     norm_stats: dict[str, transforms.NormStats] | None = None,
+    pytorch_device: str | None = None,
 ) -> _policy.Policy:
     """Create a policy from a trained checkpoint.
 
@@ -34,10 +35,12 @@ def create_trained_policy(
             data if it doesn't already exist.
         norm_stats: The norm stats to use for the policy. If not provided, the norm stats will be loaded
             from the checkpoint directory.
+        pytorch_device: Device to use for PyTorch models (e.g., "cpu", "cuda", "cuda:0"). 
+                      If None and is_pytorch=True, will use "cuda" if available, otherwise "cpu".
             
     Note:
         The function automatically detects whether the model is PyTorch-based by checking for the
-        presence of "model.safetensors" in the checkpoint directory.
+        presence of "model.safensors" in the checkpoint directory.
     """
     repack_transforms = repack_transforms or transforms.Group()
     checkpoint_dir = download.maybe_download(str(checkpoint_dir))
@@ -59,6 +62,17 @@ def create_trained_policy(
             raise ValueError("Asset id is required to load norm stats.")
         norm_stats = _checkpoints.load_norm_stats(checkpoint_dir / "assets", data_config.asset_id)
 
+    # Determine the device to use for PyTorch models
+    if is_pytorch and pytorch_device is None:
+        try:
+            import torch
+            if torch.cuda.is_available():
+                pytorch_device = "cuda"
+            else:
+                pytorch_device = "cpu"
+        except ImportError:
+            pytorch_device = "cpu"
+    
     return _policy.Policy(
         model,
         transforms=[
@@ -77,5 +91,5 @@ def create_trained_policy(
         sample_kwargs=sample_kwargs,
         metadata=train_config.policy_metadata,
         is_pytorch=is_pytorch,
-        device="cuda" if is_pytorch else None,
+        pytorch_device=pytorch_device if is_pytorch else None,
     )
