@@ -1,9 +1,39 @@
+#!/usr/bin/env python3
 """
 Train on a single example for debugging JAX vs PyTorch comparison.
+
 This script creates a deterministic dataset with one example and trains on it
 to help debug differences between JAX and PyTorch implementations.
+
+Usage examples:
+
+# Test pi05_droid model
+python scripts/train_single_example.py \
+    --model_name pi05_droid \
+    --jax_checkpoint_dir /home/$USER/.cache/openpi/openpi-assets-preview/checkpoints/pi05_droid \
+    --pytorch_checkpoint_dir /home/$USER/.cache/openpi/openpi-assets-preview/checkpoints/pi05_droid_pytorch
+
+# Test pi0_droid model  
+python scripts/train_single_example.py \
+    --model_name pi0_droid \
+    --jax_checkpoint_dir /home/$USER/.cache/openpi/openpi-assets/checkpoints/pi0_droid \
+    --pytorch_checkpoint_dir /home/$USER/.cache/openpi/openpi-assets/checkpoints/pi0_droid_pytorch
+
+# Test pi0_aloha_sim model
+python scripts/train_single_example.py \
+    --model_name pi0_aloha_sim \
+    --jax_checkpoint_dir /home/$USER/.cache/openpi/openpi-assets/checkpoints/pi0_aloha_sim \
+    --pytorch_checkpoint_dir /home/$USER/.cache/openpi/openpi-assets/checkpoints/pi0_aloha_sim_pytorch
+
+This script:
+- Creates a fixed example with deterministic random values
+- Uses the same noise and time values for both JAX and PyTorch
+- Disables preprocessing for fair comparison
+- Compares losses between implementations
+- Provides detailed analysis of differences
 """
 
+import argparse
 import logging
 import numpy as np
 import torch
@@ -11,11 +41,13 @@ import jax
 import jax.numpy as jnp
 import flax.nnx as nnx
 import flax
+import safetensors
 from unittest.mock import patch
 
 from openpi.models import model as _model
 from openpi.models.pi0_config import Pi0Config
 from openpi.models_pytorch.pi0_pytorch import PI0Pytorch
+import openpi.training.config
 
 
 def setup_logging():
@@ -26,15 +58,15 @@ def setup_logging():
     )
 
 
-def create_fixed_example():
+def create_fixed_example(model_config):
     """Create a fixed example for debugging."""
     np.random.seed(42)
 
     batch_size = 1
-    action_dim = 32
-    action_horizon = 10
+    action_dim = model_config.action_dim
+    action_horizon = model_config.action_horizon
     image_size = 224
-    max_token_len = 48
+    max_token_len = model_config.max_token_len
 
     # Create fixed images
     images = {}
@@ -94,23 +126,22 @@ def mock_preprocess_observation_pytorch(observation, **kwargs):
     return observation
 
 
-def test_pytorch_single_example(noise, time):
+def test_pytorch_single_example(noise, time, model_name, pytorch_checkpoint_dir):
     """Test PyTorch training on single example."""
     print("\n=== Testing PyTorch on Single Example ===")
 
-    # Create model
-    config = Pi0Config(action_dim=32, action_horizon=10, pi05=True)
-    model = PI0Pytorch(config)
+    # Create model using the training config
+    train_config = openpi.training.config.get_config(model_name)
+    model = PI0Pytorch(train_config.model)  # Use train_config.model instead of train_config
 
     # Load pre-trained weights
-    weight_path = "/home/jasonlu/.cache/openpi/openpi-assets-preview/checkpoints/pi05_base_pytorch2/model.safetensors"
-    print(f"Loading PyTorch weights from: {weight_path}")
+    pytorch_checkpoint_dir = pytorch_checkpoint_dir + "/model.safetensors"
+    print(f"Loading PyTorch weights from: {pytorch_checkpoint_dir}")
 
-    from safetensors.torch import load_model
-    load_model(model, weight_path)
+    safetensors.torch.load_model(model, pytorch_checkpoint_dir)
 
     # Create fixed example
-    example = create_fixed_example()
+    example = create_fixed_example(train_config.model)
 
     # Convert to PyTorch tensors
     pytorch_example = {}
@@ -146,212 +177,39 @@ def test_pytorch_single_example(noise, time):
     # Test forward pass with fixed noise and time
     model.eval()
     with torch.no_grad():
-        #try:
-        # Use mock to disable preprocessing
-        with patch('openpi.models.model.preprocess_observation_pytorch', side_effect=mock_preprocess_observation_pytorch):
-            losses = model(observation, actions, noise=noise_tensor, time=time_tensor)
-            print(f"PyTorch forward pass successful!")
-            print(f"Losses shape: {losses.shape}")
-            print(f"Losses dtype: {losses.dtype}")
-            mean_loss = losses.to(torch.float32).mean().item()
-            print(f"Mean loss: {mean_loss:.6f}")
-            return True, losses
-        # except Exception as e:
-        #     print(f"PyTorch forward pass failed: {e}")
-        #     return False, None
+        try:
+            # Use mock to disable preprocessing
+            with patch('openpi.models.model.preprocess_observation_pytorch', side_effect=mock_preprocess_observation_pytorch):
+                losses = model(observation, actions, noise=noise_tensor, time=time_tensor)
+                print(f"PyTorch forward pass successful!")
+                print(f"Losses shape: {losses.shape}")
+                print(f"Losses dtype: {losses.dtype}")
+                mean_loss = losses.to(torch.float32).mean().item()
+                print(f"Mean loss: {mean_loss:.6f}")
+                return True, losses
+        except Exception as e:
+            print(f"PyTorch forward pass failed: {e}")
+            return False, None
 
 
-def test_jax_single_example(noise, time, debug_single_layer=False):
+def test_jax_single_example(noise, time, model_name, jax_checkpoint_dir):
     """Test JAX training on single example."""
     print("\n=== Testing JAX on Single Example ===")
 
-    # Create model
-    config = Pi0Config(action_dim=32, action_horizon=10, pi05=True)
-    if debug_single_layer:
-        print("🔧 Debug mode: Using only 1 encoder layer")
-
-    # Create a custom model with modified siglip depth for debugging
-    if debug_single_layer:
-        # Import the Pi0 model class
-        from openpi.models.pi0 import Pi0
-        import openpi.models.gemma as _gemma
-        import openpi.models.siglip as _siglip
-        import flax.nnx.bridge as nnx_bridge
-
-        # Create the model manually with custom siglip variant
-        rng = jax.random.key(42)
-        rngs = flax.nnx.Rngs(rng)
-
-        paligemma_config = _gemma.get_config(config.paligemma_variant)
-        action_expert_config = _gemma.get_config(config.action_expert_variant)
-
-        # Create LLM
-        llm = nnx_bridge.ToNNX(
-            _gemma.Module(
-                configs=[paligemma_config, action_expert_config],
-                embed_dtype=config.dtype,
-                adarms=config.pi05,
-            )
-        )
-        llm.lazy_init(rngs=rngs, method="init", use_adarms=[False, True] if config.pi05 else [False, False])
-
-        # Create custom siglip model with depth=1
-        # We'll use the same variant but override the depth parameter
-        siglip_params = _siglip.decode_variant("So400m/14")
-        siglip_params["depth"] = 1  # Override depth to 1 for debugging
-
-        img = nnx_bridge.ToNNX(
-            _siglip.Module(
-                num_classes=paligemma_config.width,
-                variant=None,  # Don't use variant, use explicit params
-                pool_type="none",
-                scan=False,  # Disable scan for single layer
-                dtype_mm=config.dtype,
-                **siglip_params,  # Pass the modified parameters
-            )
-        )
-        img.lazy_init(next(iter(config.fake_obs().images.values())), train=False, rngs=rngs)
-
-        # Create the full model
-        model = Pi0(config, rngs)
-        # Replace the siglip model with our custom one
-        model.PaliGemma.img = img
-
-        print("🔧 Created single-layer SigLIP model (depth=1) for debugging...")
-    else:
-        rng = jax.random.key(42)
-        model = config.create(rng)
+    # Create model using the training config
+    train_config = openpi.training.config.get_config(model_name)
+    rng = jax.random.key(42)
+    model = train_config.model.create(rng)  # Use train_config.model instead of config.create
 
     # Load pre-trained weights
-    weight_path = "/home/jasonlu/.cache/openpi/openpi-assets-preview/checkpoints/pi05_base/params"
-    print(f"Loading JAX weights from: {weight_path}")
-
-    # try:
-    # Use the same approach as in policy_config.py
-    params = _model.restore_params(weight_path, dtype=jnp.bfloat16)
-
-    # Filter params to only include the first encoder layer for debugging
-    if debug_single_layer:
-        filtered_params = {}
-
-        # The parameters are nested, so we need to traverse the structure
-        def filter_nested_params(params_dict, key_path=""):
-            result = {}
-            for key, value in params_dict.items():
-                current_path = f"{key_path}.{key}" if key_path else key
-
-                if isinstance(value, dict):
-                    # Recursive case - traverse deeper
-                    filtered_sub = filter_nested_params(value, current_path)
-                    if filtered_sub:  # Only include if there are sub-parameters
-                        result[key] = filtered_sub
-                else:
-                    # Leaf case - check if this parameter should be included
-                    if 'Transformer' in current_path:
-                        # Only keep the first encoder block (encoderblock_0) and encoder_norm
-                        if 'encoderblock_0' in current_path or 'encoder_norm' in current_path:
-                            result[key] = value
-                    else:
-                        # Keep all non-Transformer params
-                        result[key] = value
-            return result
-
-        filtered_params = filter_nested_params(params)
-        params_to_use = filtered_params
-        print("✅ JAX weights loaded successfully (first layer only)!")
-        print("⚠️  Note: Using So400m variant with depth=1 (modified from depth=27)")
-        print("⚠️  Only the first layer weights will be used, others will be randomly initialized")
-
-        # Debug: Show what parameters we have
-        print(f"📋 Available parameters for single-layer model:")
-        transformer_params = []
-        for key in sorted(params_to_use.keys()):
-            if 'Transformer' in key:
-                transformer_params.append(key)
-                print(f"    {key}: {params_to_use[key].shape}")
-
-        if not transformer_params:
-            print("    No Transformer parameters found! Let's see all keys:")
-            for key in sorted(params_to_use.keys())[:20]:  # Show first 20 keys
-                print(f"    {key}")
-
-            # Let's also check if PaliGemma has nested structure
-            if 'PaliGemma' in params_to_use:
-                print("    Checking PaliGemma structure:")
-                paligemma_params = params_to_use['PaliGemma']
-                if hasattr(paligemma_params, 'keys'):
-                    for subkey in sorted(paligemma_params.keys()):
-                        print(f"      PaliGemma.{subkey}")
-                        if hasattr(paligemma_params[subkey], 'keys'):
-                            for subsubkey in sorted(paligemma_params[subkey].keys()):
-                                print(f"        PaliGemma.{subkey}.{subsubkey}")
-                                if hasattr(paligemma_params[subkey][subsubkey], 'keys'):
-                                    for subsubsubkey in sorted(paligemma_params[subkey][subsubkey].keys()):
-                                        if 'Transformer' in subsubsubkey:
-                                            print(f"          PaliGemma.{subkey}.{subsubkey}.{subsubsubkey}")
-
-        # The issue is that with scan=False, the model expects different parameter names
-        # We need to map from encoderblock_0 to encoderblock in the nested structure
-        def adapt_nested_params(params_dict, key_path=""):
-            result = {}
-            for key, value in params_dict.items():
-                current_path = f"{key_path}.{key}" if key_path else key
-
-                if isinstance(value, dict):
-                    # Recursive case - traverse deeper
-                    result[key] = adapt_nested_params(value, current_path)
-                else:
-                    # Leaf case - adapt the key if needed
-                    new_key = key
-                    if 'Transformer' in current_path and 'encoderblock_0' in key:
-                        # Map encoderblock_0 to encoderblock for non-scan mode
-                        new_key = key.replace('encoderblock_0', 'encoderblock')
-                    result[new_key] = value
-            return result
-
-        adapted_params = adapt_nested_params(params_to_use)
-        params_to_use = adapted_params
-        print("🔄 Adapted parameter names for non-scan mode")
-        print(f"  Example mapping: encoderblock_0 -> encoderblock")
-    else:
-        params_to_use = params
-        print("✅ JAX weights loaded successfully!")
+    print(f"Loading JAX weights from: {jax_checkpoint_dir}")
+    params = _model.restore_params(jax_checkpoint_dir, dtype=jnp.bfloat16)
+    params_to_use = params
+    print("✅ JAX weights loaded successfully!")
 
     # Apply the params to the model using NNX state management
     import flax.nnx as nnx
     graphdef, model_state = nnx.split(model)
-
-    # Debug: Let me check what the model actually expects first
-    print(f"🔍 Checking what the model expects...")
-    try:
-        print(f"📋 Model parameter structure:")
-        model_transformer_params = []
-        for key in sorted(model_state.keys()):
-            if 'Transformer' in key:
-                model_transformer_params.append(key)
-                print(f"    {key}: shape {getattr(model_state[key], 'shape', 'no shape')}")
-
-        if not model_transformer_params:
-            print("    No Transformer parameters found in model! Let's see all keys:")
-            for key in sorted(model_state.keys())[:20]:  # Show first 20 keys
-                print(f"    {key}")
-
-            # Let's also check if PaliGemma has nested structure in model
-            if 'PaliGemma' in model_state:
-                print("    Checking PaliGemma structure in model:")
-                paligemma_state = model_state['PaliGemma']
-                if hasattr(paligemma_state, 'keys'):
-                    for subkey in sorted(paligemma_state.keys()):
-                        print(f"      PaliGemma.{subkey}")
-                        if hasattr(paligemma_state[subkey], 'keys'):
-                            for subsubkey in sorted(paligemma_state[subkey].keys()):
-                                print(f"        PaliGemma.{subkey}.{subsubkey}")
-                                if hasattr(paligemma_state[subkey][subsubkey], 'keys'):
-                                    for subsubsubkey in sorted(paligemma_state[subkey][subsubkey].keys()):
-                                        if 'Transformer' in subsubsubkey:
-                                            print(f"          PaliGemma.{subkey}.{subsubkey}.{subsubsubkey}")
-    except Exception as e:
-        print(f"    Could not inspect model parameters: {e}")
 
     # Now try to load parameters
     try:
@@ -362,12 +220,9 @@ def test_jax_single_example(noise, time, debug_single_layer=False):
         print(f"❌ Parameter loading failed: {e}")
         print("🔄 Continuing with random initialization...")
         model = nnx.merge(graphdef, model_state)
-    # except Exception as e:
-    #     print(f"❌ Failed to load JAX weights: {e}")
-    #     print("Continuing with random initialization...")
 
     # Create fixed example
-    example = create_fixed_example()
+    example = create_fixed_example(train_config.model)
 
     # Convert to JAX arrays
     jax_example = {}
@@ -395,20 +250,20 @@ def test_jax_single_example(noise, time, debug_single_layer=False):
     print(f"Time shape: {time_jax.shape}, dtype: {time_jax.dtype}")
 
     # Test forward pass with fixed noise and time
-    # try:
-    # Use the modified compute_loss method that accepts external noise and time
-    # Use mock to disable preprocessing
-    with patch('openpi.models.model.preprocess_observation', side_effect=mock_preprocess_observation):
-        losses = model.compute_loss(rng, observation, actions, train=False, noise=noise_jax, time=time_jax)
-        print(f"JAX forward pass successful!")
-        print(f"Losses shape: {losses.shape}")
-        print(f"Losses dtype: {losses.dtype}")
-        mean_loss = jnp.mean(losses).item()
-        print(f"Mean loss: {mean_loss:.6f}")
-        return True, losses
-    # except Exception as e:
-    #     print(f"JAX forward pass failed: {e}")
-    #     return False, None
+    try:
+        # Use the modified compute_loss method that accepts external noise and time
+        # Use mock to disable preprocessing
+        with patch('openpi.models.model.preprocess_observation', side_effect=mock_preprocess_observation):
+            losses = model.compute_loss(rng, observation, actions, train=False, noise=noise_jax, time=time_jax)
+            print(f"JAX forward pass successful!")
+            print(f"Losses shape: {losses.shape}")
+            print(f"Losses dtype: {losses.dtype}")
+            mean_loss = jnp.mean(losses).item()
+            print(f"Mean loss: {mean_loss:.6f}")
+            return True, losses
+    except Exception as e:
+        print(f"JAX forward pass failed: {e}")
+        return False, None
 
 
 def compare_losses(pytorch_loss, jax_loss):
@@ -422,29 +277,6 @@ def compare_losses(pytorch_loss, jax_loss):
 
     print(f"PyTorch loss: {pytorch_loss}")
     print(f"JAX loss: {jax_loss}")
-
-    # # Handle tensor inputs by computing mean if needed
-    # if hasattr(pytorch_loss, 'mean'):
-    #     pytorch_mean = pytorch_loss.to(torch.float32).mean().item()
-    #     pytorch_std = pytorch_loss.to(torch.float32).std().item()
-    #     print(f"PyTorch loss tensor - Mean: {pytorch_mean:.8f}, Std: {pytorch_std:.8f}")
-    #     print(f"PyTorch loss shape: {pytorch_loss.shape}")
-    # else:
-    #     pytorch_mean = float(pytorch_loss)
-    #     pytorch_std = 0.0
-    #     print(f"PyTorch loss scalar: {pytorch_mean:.8f}")
-
-    # if hasattr(jax_loss, 'mean'):
-    #     jax_mean = jax_loss.mean().item()
-    #     jax_std = jax_loss.std().item()
-    #     print(f"JAX loss tensor - Mean: {jax_mean:.8f}, Std: {jax_std:.8f}")
-    #     print(f"JAX loss shape: {jax_loss.shape}")
-    # else:
-    #     jax_mean = float(jax_loss)
-    #     jax_std = 0.0
-    #     print(f"JAX loss scalar: {jax_mean:.8f}")
-
-
 
     # Additional tensor analysis if both are tensors
     pytorch_loss = pytorch_loss.to(torch.float32)
@@ -513,28 +345,43 @@ def compare_losses(pytorch_loss, jax_loss):
 
 def main():
     """Main function to test both implementations."""
+    parser = argparse.ArgumentParser(description="Train on a single example for JAX vs PyTorch comparison")
+    parser.add_argument("--model_name", type=str, default="pi05_droid", 
+                       choices=["pi0_aloha_sim", "pi0_aloha_towel", "pi0_base", "pi05_droid", "pi0_droid", "pi0_libero", "pi05_libero"],
+                       help="Model name to use")
+    parser.add_argument("--jax_checkpoint_dir", type=str, required=True,
+                       help="Directory containing JAX model checkpoints")
+    parser.add_argument("--pytorch_checkpoint_dir", type=str, required=True,
+                       help="Directory containing PyTorch model checkpoints")
+    args = parser.parse_args()
+
     setup_logging()
 
     print("🚀 Testing Single Example Training for JAX vs PyTorch Comparison")
     print("=" * 70)
-    print("📁 Loading pre-trained weights for both models...")
+    print(f"📁 Model: {args.model_name}")
+    print(f"📁 JAX checkpoint: {args.jax_checkpoint_dir}")
+    print(f"📁 PyTorch checkpoint: {args.pytorch_checkpoint_dir}")
     print("🎯 Using fixed noise and time values for deterministic comparison...")
-    print("🔧 Debug mode: JAX model will use only 1 encoder layer for faster debugging...")
     print("🚫 Preprocessing disabled: Image augmentations and resizing are bypassed for fair comparison...")
+
+    # Get model configuration
+    train_config = openpi.training.config.get_config(args.model_name)
+    model_config = train_config.model
 
     # Generate fixed noise and time
     noise, time = create_fixed_noise_and_time(
         batch_size=1, 
-        action_horizon=10, 
-        action_dim=32
+        action_horizon=model_config.action_horizon, 
+        action_dim=model_config.action_dim
     )
 
     # Test PyTorch
-    pytorch_success, pytorch_losses = test_pytorch_single_example(noise, time)
+    pytorch_success, pytorch_losses = test_pytorch_single_example(noise, time, args.model_name, args.pytorch_checkpoint_dir)
     torch.cuda.empty_cache()
 
     # Test JAX
-    jax_success, jax_losses = test_jax_single_example(noise, time, debug_single_layer=False)
+    jax_success, jax_losses = test_jax_single_example(noise, time, args.model_name, args.jax_checkpoint_dir)
 
     # Compare losses
     if pytorch_success and jax_success:

@@ -7,33 +7,6 @@ from transformers.models.gemma import modeling_gemma
 from transformers.models.auto import CONFIG_MAPPING
 
 
-# TODO: compare this rope vs gemma rope
-def apply_rope(x, positions, max_wavelength=10_000):
-    """
-    Applies RoPE positions [B, L] to x [B, L, H, D].
-    """
-    d_half = x.shape[-1] // 2
-    device = x.device
-    dtype = x.dtype
-    x = x.to(torch.float32)
-
-    freq_exponents = (2.0 / x.shape[-1]) * torch.arange(d_half, dtype=torch.float32, device=device)
-    timescale = max_wavelength**freq_exponents
-    radians = positions[..., None].to(torch.float32) / timescale[None, None, :].to(torch.float32)
-
-    radians = radians[..., None, :]
-
-    sin = torch.sin(radians)  # .to(dtype=dtype)
-    cos = torch.cos(radians)  # .to(dtype=dtype)
-
-    x1, x2 = x.split(d_half, dim=-1)
-    res = torch.empty_like(x)
-    res[..., :d_half] = x1 * cos - x2 * sin
-    res[..., d_half:] = x2 * cos + x1 * sin
-
-    return res.to(dtype)
-
-
 class PaliGemmaWithExpertModel(nn.Module):
     def __init__(self, vlm_config, action_expert_config, use_adarms=[False, False]):
         super().__init__()
@@ -56,7 +29,6 @@ class PaliGemmaWithExpertModel(nn.Module):
         vlm_config_hf.vision_config.projection_dim = 2048
         vlm_config_hf.vision_config.projector_hidden_act = "gelu_fast"
         vlm_config_hf.vision_config.torch_dtype = "float32"
-        # vlm_config_hf.vision_config._attn_implementation = "flash_attention_2"
 
         action_expert_config_hf = CONFIG_MAPPING["gemma"](
             head_dim=action_expert_config.head_dim,

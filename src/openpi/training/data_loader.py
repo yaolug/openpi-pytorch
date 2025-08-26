@@ -7,6 +7,7 @@ from typing import Protocol, SupportsIndex, TypeVar
 import jax
 import jax.numpy as jnp
 import lerobot.common.datasets.lerobot_dataset as lerobot_dataset
+import logging
 import numpy as np
 import torch
 
@@ -228,7 +229,7 @@ def create_data_loader(
 ) -> DataLoader[tuple[_model.Observation, _model.Actions]]:
     """Create a data loader for training."""
     data_config = config.data.create(config.assets_dirs, config.model)
-    print(f"data_config: {data_config}")
+    logging.info(f"data_config: {data_config}")
 
     if data_config.rlds_data_dir is not None:
         return create_rlds_data_loader(
