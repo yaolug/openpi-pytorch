@@ -12,9 +12,13 @@ from flax import struct
 from flax import traverse_util
 import jax
 import jax.numpy as jnp
+import logging
 import numpy as np
 import orbax.checkpoint as ocp
+import safetensors
+import torch
 
+from openpi.models_pytorch import pi0_pytorch
 from openpi.shared import image_tools
 import openpi.shared.array_typing as at
 
@@ -112,6 +116,8 @@ class Observation(Generic[ArrayT]):
         for key in data["image"]:
             if data["image"][key].dtype == np.uint8:
                 data["image"][key] = data["image"][key].astype(np.float32) / 255.0 * 2.0 - 1.0
+            elif hasattr(data["image"][key], 'dtype') and data["image"][key].dtype == torch.uint8:
+                data["image"][key] = data["image"][key].to(torch.float32).permute(0, 3, 1, 2) / 255.0 * 2.0 - 1.0
         return cls(
             images=data["image"],
             image_masks=data["image_mask"],
@@ -234,6 +240,12 @@ class BaseModelConfig(abc.ABC):
         state.replace_by_pure_dict(params)
         return nnx.merge(graphdef, state)
 
+    def load_pytorch(self, train_config, weight_path: str):
+        logger.info(f"train_config: {train_config}")
+        model = pi0_pytorch.PI0Pytorch(config=train_config.model)
+        safetensors.torch.load_model(model, weight_path)
+        return model
+
     @abc.abstractmethod
     def inputs_spec(self, *, batch_size: int = 1) -> tuple[Observation, Actions]:
         """Returns the input specification for the model. Values are jax.ShapeDtypeStruct."""
@@ -268,7 +280,7 @@ class BaseModel(nnx.Module, abc.ABC):
     ) -> at.Float[at.Array, "*b ah"]: ...
 
     @abc.abstractmethod
-    def sample_actions(self, rng: at.KeyArrayLike, observation: Observation) -> Actions: ...
+    def sample_actions(self, rng: at.KeyArrayLike, observation: Observation, **kwargs) -> Actions: ...
 
 
 def restore_params(
