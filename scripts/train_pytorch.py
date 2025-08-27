@@ -127,32 +127,12 @@ def set_seed(seed: int, local_rank: int):
 
 
 def build_datasets(config: _config.TrainConfig):
-	# Reuse existing dataset + transforms pipeline
-	data_conf = config.data.create(config.assets_dirs, config.model)
-	dataset = _data.create_torch_dataset(data_conf, config.model.action_horizon, config.model)
-	print(f"data_conf: {data_conf}")
-	dataset = _data.transform_dataset(dataset, data_conf)
-	return dataset, data_conf
+	# Use the unified data loader with PyTorch framework
+	data_loader = _data.create_data_loader(config, framework="pytorch", shuffle=True)
+	return data_loader, data_loader.data_config()
 
 
-def collate_to_numpy(batch_list: list[Dict[str, Any]]) -> Dict[str, Any]:
-	# Recursively stack leaves with numpy
-	def stack_leaf(*xs):
-		return np.stack([np.asarray(x) for x in xs], axis=0)
 
-	# Memory-efficient collation
-	result = torch.utils.data.default_collate(batch_list) if not isinstance(batch_list[0], dict) else _tree_map_multi(stack_leaf, batch_list)
-
-	return result
-
-
-def _tree_map_multi(func, batch_list):
-	# batch_list is a list of dicts with same structure; reduce by zipping leaves
-	def recurse(keys, items):
-		if isinstance(items[0], dict):
-			return {k: recurse(keys + [k], [it[k] for it in items]) for k in items[0].keys()}
-		return func(*items)
-	return recurse([], batch_list)
 
 
 def batch_to_torch(batch: Dict[str, Any], device: torch.device) -> Dict[str, Any]:
@@ -383,22 +363,19 @@ def train_loop(config: _config.TrainConfig, resume: bool = False, enable_gradien
 	if is_main:
 		init_wandb(config, resuming=resuming, enabled=config.wandb_enabled)
 
-	# Build dataset + sampler + loader
-	dataset, data_conf = build_datasets(config)
-	sampler = None
-	if use_ddp:
-		sampler = torch.utils.data.distributed.DistributedSampler(dataset, num_replicas=torch.distributed.get_world_size(), rank=torch.distributed.get_rank(), shuffle=True, drop_last=True)
-
-	# Use full batch size since we removed gradient accumulation
-	effective_batch_size = config.batch_size // (torch.distributed.get_world_size() if use_ddp else 1)
-
-	loader = torch.utils.data.DataLoader(dataset, batch_size=effective_batch_size, shuffle=(sampler is None), sampler=sampler, num_workers=config.num_workers, pin_memory=True, drop_last=True, collate_fn=collate_to_numpy)
+	# Build data loader using the unified data loader
+	data_loader, data_conf = build_datasets(config)
+	loader = data_loader
 
 	# Log sample images to wandb on first batch
 	if is_main and config.wandb_enabled and not resuming:
-		# Create a separate iterator for sample batch to avoid consuming the main loader
-		sample_loader = torch.utils.data.DataLoader(dataset, batch_size=effective_batch_size, shuffle=False, sampler=sampler, num_workers=config.num_workers, pin_memory=True, drop_last=True, collate_fn=collate_to_numpy)
-		sample_batch = next(iter(sample_loader))
+		# Create a separate data loader for sample batch to avoid consuming the main loader
+		sample_data_loader = _data.create_data_loader(config, framework="pytorch", shuffle=False)
+		sample_batch = next(iter(sample_data_loader))
+		# Convert observation and actions to torch tensors
+		observation, actions = sample_batch
+		sample_batch = observation.to_dict()
+		sample_batch["actions"] = actions
 		sample_batch = batch_to_torch(sample_batch, device)
 
 		# Create sample images for wandb
@@ -513,24 +490,30 @@ def train_loop(config: _config.TrainConfig, resume: bool = False, enable_gradien
 	pbar = tqdm.tqdm(total=config.num_train_steps, initial=global_step, desc="Training", disable=not is_main) if is_main else None
 
 	while global_step < config.num_train_steps:
-		if use_ddp:
-			sampler.set_epoch(global_step // len(loader))
+		# Set epoch for distributed training
+		if use_ddp and hasattr(loader, 'set_epoch'):
+			loader.set_epoch(global_step // len(loader))
 
 		for batch in loader:
 			# Check if we've reached the target number of steps
 			if global_step >= config.num_train_steps:
 				break
 
-			# Convert dict batch directly to torch tensors (bypass Observation.from_dict for PyTorch)
-			batch = batch_to_torch(batch, device)
-			actions = batch["actions"]
+			# The unified data loader returns (observation, actions) tuple
+			observation, actions = batch
+			
+			# Convert observation and actions to torch tensors
+			observation_dict = observation.to_dict()
+			observation_dict["actions"] = actions
+			batch_torch = batch_to_torch(observation_dict, device)
+			actions = batch_torch["actions"]
 
 			# Update LR
 			for pg in optim.param_groups:
 				pg["lr"] = lr_schedule(global_step)
 
 			# Forward pass
-			observation = _model.Observation.from_dict(batch)
+			observation = _model.Observation.from_dict(batch_torch)
 			losses = model(observation, actions)
 			# Ensure losses is a tensor and handle different return types
 			if isinstance(losses, (list, tuple)):
