@@ -568,7 +568,12 @@ def convert_pi0_checkpoint(checkpoint_dir: str, precision: str, output_path: str
         print(f"Warning: Could not load all parameters: {e}")
         print("Continuing with partial load...")
     
-    pi0_model = pi0_model.to(torch.float32)
+    if precision == "float32":
+        pi0_model = pi0_model.to(torch.float32)
+    elif precision == "bfloat16":
+        pi0_model = pi0_model.to(torch.bfloat16)
+    else:
+        raise ValueError(f"Invalid precision: {precision}")
 
     # Save the converted model using safetensors
     os.makedirs(output_path, exist_ok=True)
@@ -615,7 +620,7 @@ def main():
     parser.add_argument(
         "--precision",
         choices=["float32", "bfloat16", "float16"],
-        default="float32",
+        default="bfloat16",
         type=str,
         help="Precision for model conversion"
     )

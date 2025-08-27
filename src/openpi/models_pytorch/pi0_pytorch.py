@@ -8,7 +8,7 @@ import torch.nn.functional as F
 
 import openpi.models.gemma as _gemma
 from openpi.models_pytorch.gemma_pytorch import PaliGemmaWithExpertModel
-import openpi.models.model as _model
+import openpi.models_pytorch.preprocessing_pytorch as _preprocessing
 
 
 def get_safe_dtype(target_dtype, device_type):
@@ -93,7 +93,7 @@ class PI0Pytorch(nn.Module):
         paligemma_config = _gemma.get_config(config.paligemma_variant)
         action_expert_config = _gemma.get_config(config.action_expert_variant)
 
-        self.paligemma_with_expert = PaliGemmaWithExpertModel(paligemma_config, action_expert_config, use_adarms=[False, True] if self.pi05 else [False, False])
+        self.paligemma_with_expert = PaliGemmaWithExpertModel(paligemma_config, action_expert_config, use_adarms=[False, True] if self.pi05 else [False, False], precision=config.dtype)
 
         self.action_in_proj = nn.Linear(32, action_expert_config.width)
         self.action_out_proj = nn.Linear(action_expert_config.width, 32)
@@ -150,7 +150,7 @@ class PI0Pytorch(nn.Module):
 
     def _preprocess_observation(self, observation, train=True):
         """Helper method to preprocess observation."""
-        observation = _model.preprocess_observation_pytorch(observation, train=train)
+        observation = _preprocessing.preprocess_observation_pytorch(observation, train=train)
         return (
             list(observation.images.values()),
             list(observation.image_masks.values()),
@@ -320,7 +320,9 @@ class PI0Pytorch(nn.Module):
 
         prefix_embs, prefix_pad_masks, prefix_att_masks = self.embed_prefix(images, img_masks, lang_tokens, lang_masks)
         suffix_embs, suffix_pad_masks, suffix_att_masks, adarms_cond = self.embed_suffix(state, x_t, time)
-        #suffix_embs = suffix_embs.to(dtype=torch.bfloat16)
+        if self.paligemma_with_expert.paligemma.language_model.layers[0].self_attn.q_proj.weight.dtype == torch.bfloat16:
+            suffix_embs = suffix_embs.to(dtype=torch.bfloat16)
+            prefix_embs = prefix_embs.to(dtype=torch.bfloat16)
 
         pad_masks = torch.cat([prefix_pad_masks, suffix_pad_masks], dim=1)
         att_masks = torch.cat([prefix_att_masks, suffix_att_masks], dim=1)

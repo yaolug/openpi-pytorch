@@ -5,10 +5,11 @@ from transformers import GemmaForCausalLM, PaliGemmaForConditionalGeneration
 from transformers.models.gemma import modeling_gemma
 
 from transformers.models.auto import CONFIG_MAPPING
+from typing import Literal
 
 
 class PaliGemmaWithExpertModel(nn.Module):
-    def __init__(self, vlm_config, action_expert_config, use_adarms=[False, False]):
+    def __init__(self, vlm_config, action_expert_config, use_adarms=[False, False], precision: Literal["bfloat16", "float32"] = "bfloat16"):
         super().__init__()
 
         vlm_config_hf = CONFIG_MAPPING["paligemma"]()
@@ -50,21 +51,26 @@ class PaliGemmaWithExpertModel(nn.Module):
 
         self.to_bfloat16_for_selected_params()
 
-    def to_bfloat16_for_selected_params(self):
-        self = self.to(dtype=torch.float32)
+    def to_bfloat16_for_selected_params(self, precision: Literal["bfloat16", "float32"] = "bfloat16"):
+        if precision == "bfloat16":
+            self = self.to(dtype=torch.bfloat16)
+        elif precision == "float32":
+            self = self.to(dtype=torch.float32)
+        else:
+            raise ValueError(f"Invalid precision: {precision}")
 
-        # params_to_keep_float32 = [
-        #     "vision_tower.vision_model.embeddings.patch_embedding.weight",
-        #     "vision_tower.vision_model.embeddings.patch_embedding.bias",
-        #     "vision_tower.vision_model.embeddings.position_embedding.weight",
-        #     "input_layernorm",
-        #     "post_attention_layernorm",
-        #     "model.norm",
-        # ]
+        params_to_keep_float32 = [
+            "vision_tower.vision_model.embeddings.patch_embedding.weight",
+            "vision_tower.vision_model.embeddings.patch_embedding.bias",
+            "vision_tower.vision_model.embeddings.position_embedding.weight",
+            "input_layernorm",
+            "post_attention_layernorm",
+            "model.norm",
+        ]
 
-        # for name, param in self.named_parameters():
-        #     if any(selector in name for selector in params_to_keep_float32):
-        #         param.data = param.data.to(dtype=torch.float32)
+        for name, param in self.named_parameters():
+            if any(selector in name for selector in params_to_keep_float32):
+                param.data = param.data.to(dtype=torch.float32)
 
     def embed_image(self, image: torch.Tensor):
         return self.paligemma.model.get_image_features(image)
@@ -194,7 +200,9 @@ class PaliGemmaWithExpertModel(nn.Module):
                     out_emb = modeling_gemma._gated_residual(hidden_states, out_emb, gates[i])
                     after_first_residual = out_emb.clone()
                     out_emb, gate = layer.post_attention_layernorm(out_emb, cond=adarms_cond[i])
-                    #out_emb = out_emb.to(dtype=torch.bfloat16)
+                    # Convert to bfloat16 if the next layer (mlp) uses bfloat16
+                    if layer.mlp.up_proj.weight.dtype == torch.bfloat16:
+                        out_emb = out_emb.to(dtype=torch.bfloat16)
 
                     out_emb = layer.mlp(out_emb)
                     # second residual

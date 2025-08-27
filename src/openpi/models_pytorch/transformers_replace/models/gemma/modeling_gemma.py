@@ -457,6 +457,10 @@ class GemmaModel(GemmaPreTrainedModel):
         adarms_cond: Optional[torch.Tensor] = None,
         **kwargs: Unpack[FlashAttentionKwargs],
     ) -> BaseModelOutputWithPast:
+        """
+        adarms_cond (`torch.Tensor` of shape `(batch_size, cond_dim)`, *optional*):
+            Condition for ADARMS.
+        """
         output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
         output_hidden_states = (
             output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
@@ -498,7 +502,9 @@ class GemmaModel(GemmaPreTrainedModel):
 
         # embed positions
         hidden_states = inputs_embeds
-        #hidden_states = hidden_states.to(torch.bfloat16)
+        # Convert to bfloat16 if the first layer uses bfloat16
+        if len(self.layers) > 0 and self.layers[0].input_layernorm.weight.dtype == torch.bfloat16:
+            hidden_states = hidden_states.to(torch.bfloat16)
 
         # create position embeddings to be shared across the decoder layers
         position_embeddings = self.rotary_emb(hidden_states, position_ids)
@@ -609,6 +615,9 @@ class GemmaForCausalLM(GemmaPreTrainedModel, GenerationMixin):
             config.vocab_size]` or -100 (see `input_ids` docstring). Tokens with indices set to `-100` are ignored
             (masked), the loss is only computed for the tokens with labels in `[0, ..., config.vocab_size]`.
 
+        adarms_cond (`torch.Tensor` of shape `(batch_size, cond_dim)`, *optional*):
+            Condition for ADARMS.
+
         Example:
 
         ```python
@@ -713,6 +722,9 @@ class GemmaForSequenceClassification(GemmaPreTrainedModel):
             Labels for computing the sequence classification/regression loss. Indices should be in `[0, ...,
             config.num_labels - 1]`. If `config.num_labels == 1` a regression loss is computed (Mean-Square loss), If
             `config.num_labels > 1` a classification loss is computed (Cross-Entropy).
+
+        adarms_cond (`torch.Tensor` of shape `(batch_size, cond_dim)`, *optional*):
+            Condition for ADARMS.
         """
 
         transformer_outputs: BaseModelOutputWithPast = self.model(
@@ -809,6 +821,9 @@ class GemmaForTokenClassification(GemmaPreTrainedModel):
             Labels for computing the sequence classification/regression loss. Indices should be in `[0, ...,
             config.num_labels - 1]`. If `config.num_labels == 1` a regression loss is computed (Mean-Square loss), If
             `config.num_labels > 1` a classification loss is computed (Cross-Entropy).
+
+        adarms_cond (`torch.Tensor` of shape `(batch_size, cond_dim)`, *optional*):
+            Condition for ADARMS.
         """
 
         outputs: BaseModelOutputWithPast = self.model(

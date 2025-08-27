@@ -126,10 +126,9 @@ def set_seed(seed: int, local_rank: int):
 		torch.cuda.manual_seed_all(seed + local_rank)
 
 
-def build_datasets(config: _config.TrainConfig, effective_batch_size: int | None = None):
+def build_datasets(config: _config.TrainConfig):
 	# Use the unified data loader with PyTorch framework
-	batch_size = effective_batch_size if effective_batch_size is not None else config.batch_size
-	data_loader = _data.create_data_loader(config, framework="pytorch", shuffle=True, batch_size_override=batch_size)
+	data_loader = _data.create_data_loader(config, framework="pytorch", shuffle=True)
 	return data_loader, data_loader.data_config()
 
 
@@ -326,14 +325,14 @@ def log_memory_usage(device, step, phase="unknown"):
 	logging.info(f"Step {step} ({phase}): GPU memory - allocated: {memory_allocated:.2f}GB, reserved: {memory_reserved:.2f}GB, free: {memory_free:.2f}GB, peak_allocated: {max_memory_allocated:.2f}GB, peak_reserved: {max_memory_reserved:.2f}GB{ddp_info}")
 
 
-def train_loop(config: _config.TrainConfig, resume: bool = False, enable_gradient_checkpointing: bool = False):
+def train_loop(config: _config.TrainConfig):
 	use_ddp, local_rank, device = setup_ddp()
 	is_main = (not use_ddp) or (dist.get_rank() == 0)
 	set_seed(config.seed, local_rank)
 
 	# Initialize checkpoint directory and wandb
 	resuming = False
-	if resume:
+	if config.resume:
 		# Find checkpoint directory based on experiment name
 		exp_checkpoint_dir = config.checkpoint_dir
 		if exp_checkpoint_dir.exists():
@@ -366,14 +365,18 @@ def train_loop(config: _config.TrainConfig, resume: bool = False, enable_gradien
 
 	# Build data loader using the unified data loader
 	# Calculate effective batch size per GPU for DDP
-	effective_batch_size = config.batch_size // (torch.distributed.get_world_size() if use_ddp else 1)
-	logging.info(f"Using batch size per GPU: {effective_batch_size} (total batch size: {config.batch_size})")
-	data_loader, data_conf = build_datasets(config, effective_batch_size)
+	# For N GPUs, each GPU should get batch_size/N samples, so total across all GPUs is batch_size
+	world_size = torch.distributed.get_world_size() if use_ddp else 1
+	effective_batch_size = config.batch_size // world_size
+	logging.info(f"Using batch size per GPU: {effective_batch_size} (total batch size across {world_size} GPUs: {config.batch_size})")
+	
+	# Pass the original batch size to data loader - it will handle DDP splitting internally
+	loader, _ = build_datasets(config)
 
 	# Log sample images to wandb on first batch
 	if is_main and config.wandb_enabled and not resuming:
 		# Create a separate data loader for sample batch to avoid consuming the main loader
-		sample_data_loader = _data.create_data_loader(config, framework="pytorch", shuffle=False, batch_size_override=effective_batch_size)
+		sample_data_loader = _data.create_data_loader(config, framework="pytorch", shuffle=False)
 		sample_batch = next(iter(sample_data_loader))
 		# Convert observation and actions to torch tensors
 		observation, actions = sample_batch
@@ -401,6 +404,7 @@ def train_loop(config: _config.TrainConfig, resume: bool = False, enable_gradien
 	if not isinstance(config.model, openpi.models.pi0_config.Pi0Config):
 		# Convert dataclass to Pi0Config if needed
 		model_cfg = openpi.models.pi0_config.Pi0Config(
+			dtype=config.pytorch_training_precision,
 			action_dim=config.model.action_dim,
 			action_horizon=config.model.action_horizon,
 			max_token_len=config.model.max_token_len,
@@ -413,9 +417,13 @@ def train_loop(config: _config.TrainConfig, resume: bool = False, enable_gradien
 
 	model = openpi.models_pytorch.pi0_pytorch.PI0Pytorch(model_cfg).to(device)
 	
-	if enable_gradient_checkpointing and hasattr(model, 'gradient_checkpointing_enable'):
+	if hasattr(model, 'gradient_checkpointing_enable'):
+		enable_gradient_checkpointing = True
 		model.gradient_checkpointing_enable()
 		logging.info("Enabled gradient checkpointing for memory optimization")
+	else:
+		enable_gradient_checkpointing = False
+		logging.info("Gradient checkpointing is not supported for this model")
 	
 	# Log initial memory usage after model creation
 	if is_main and torch.cuda.is_available():
@@ -426,13 +434,12 @@ def train_loop(config: _config.TrainConfig, resume: bool = False, enable_gradien
 		model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[device.index] if device.type == "cuda" else None, find_unused_parameters=True)
 
 	# Load weights from weight_loader if specified (for fine-tuning)
-	if isinstance(config.weight_loader, str):
-		weight_path = config.weight_loader
-		logging.info(f"Loading weights from: {weight_path}")
+	if config.pytorch_weight_path is not None:
+		logging.info(f"Loading weights from: {config.pytorch_weight_path}")
 
-		model_path = os.path.join(weight_path, "model.safetensors")
+		model_path = os.path.join(config.pytorch_weight_path, "model.safetensors")
 		safetensors.torch.load_model((model.module if isinstance(model, torch.nn.parallel.DistributedDataParallel) else model), model_path)
-		logging.info(f"Loaded PyTorch weights from {weight_path}")
+		logging.info(f"Loaded PyTorch weights from {config.pytorch_weight_path}")
 
 	# Optimizer + learning rate schedule from config
 	warmup_steps = config.lr_schedule.warmup_steps
@@ -625,19 +632,7 @@ def train_loop(config: _config.TrainConfig, resume: bool = False, enable_gradien
 def main():
 	init_logging()
 	config = _config.cli()
-
-	# Parse additional command line arguments for memory optimization
-	parser = argparse.ArgumentParser(add_help=False)
-	parser.add_argument("--resume", action="store_true", default=False,
-						help="Resume training from the latest checkpoint for the experiment (handles both PyTorch and JAX checkpoints)")
-
-	parser.add_argument("--enable_gradient_checkpointing", action="store_true", default=True,
-						help="Enable gradient checkpointing for memory optimization")
-	args, _ = parser.parse_known_args()
-
-	train_loop(config, 
-			   resume=args.resume,
-			   enable_gradient_checkpointing=args.enable_gradient_checkpointing)
+	train_loop(config)
 
 
 if __name__ == "__main__":

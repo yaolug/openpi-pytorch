@@ -228,7 +228,6 @@ def create_data_loader(
     num_batches: int | None = None,
     skip_norm_stats: bool = False,
     framework: Literal["jax", "pytorch"],
-    batch_size_override: int | None = None,
 ) -> DataLoader[tuple[_model.Observation, _model.Actions]]:
     """Create a data loader for training.
     
@@ -247,7 +246,7 @@ def create_data_loader(
         return create_rlds_data_loader(
             data_config,
             action_horizon=config.model.action_horizon,
-            batch_size=batch_size_override if batch_size_override is not None else config.batch_size,
+            batch_size=config.batch_size,
             sharding=sharding,
             shuffle=shuffle,
             num_batches=num_batches,
@@ -258,7 +257,7 @@ def create_data_loader(
         data_config,
         model_config=config.model,
         action_horizon=config.model.action_horizon,
-        batch_size=batch_size_override if batch_size_override is not None else config.batch_size,
+        batch_size=config.batch_size,
         sharding=sharding,
         shuffle=shuffle,
         num_batches=num_batches,
@@ -304,14 +303,34 @@ def create_torch_data_loader(
     dataset = transform_dataset(dataset, data_config, skip_norm_stats=skip_norm_stats)
 
     # Use TorchDataLoader for both frameworks
-    # For PyTorch, batch_size is already per-GPU (calculated in train_pytorch.py)
-    # For JAX, we need to divide by process count
-    local_batch_size = batch_size if framework == "pytorch" else batch_size // jax.process_count()
+    # For PyTorch DDP, create DistributedSampler and divide batch size by world size
+    # For JAX, divide by process count
+    sampler = None
+    if framework == "pytorch":
+        try:
+            import torch.distributed as dist
+            if dist.is_initialized():
+                sampler = torch.utils.data.distributed.DistributedSampler(
+                    dataset,
+                    num_replicas=dist.get_world_size(),
+                    rank=dist.get_rank(),
+                    shuffle=shuffle,
+                    drop_last=True,
+                )
+                local_batch_size = batch_size // dist.get_world_size()
+            else:
+                local_batch_size = batch_size
+        except ImportError:
+            local_batch_size = batch_size
+    else:
+        local_batch_size = batch_size // jax.process_count()
+
     data_loader = TorchDataLoader(
         dataset,
         local_batch_size=local_batch_size,
         sharding=None if framework == "pytorch" else sharding,
-        shuffle=shuffle,
+        shuffle=(sampler is None and shuffle),  # Don't shuffle if using sampler
+        sampler=sampler,
         num_batches=num_batches,
         num_workers=num_workers,
         seed=seed,
@@ -373,6 +392,7 @@ class TorchDataLoader:
         *,
         sharding: jax.sharding.Sharding | None = None,
         shuffle: bool = False,
+        sampler: torch.utils.data.Sampler | None = None,
         num_batches: int | None = None,
         num_workers: int = 0,
         seed: int = 0,
@@ -418,7 +438,8 @@ class TorchDataLoader:
         self._data_loader = torch.utils.data.DataLoader(
             typing.cast(torch.utils.data.Dataset, dataset),
             batch_size=local_batch_size,
-            shuffle=shuffle,
+            shuffle=(sampler is None and shuffle),  # Don't shuffle if using sampler
+            sampler=sampler,
             num_workers=num_workers,
             multiprocessing_context=mp_context,
             persistent_workers=num_workers > 0,

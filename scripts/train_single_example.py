@@ -284,8 +284,8 @@ def test_pytorch_single_example(noise, time, model_name, pytorch_checkpoint_dir,
     model.train()  # Set to training mode for backward pass
     
     try:
-        # Use mock to disable preprocessing
-        with patch('openpi.models.model.preprocess_observation_pytorch', side_effect=mock_preprocess_observation_pytorch):
+        # Mock preprocess_observation_pytorch to avoid augmentations
+        with patch('openpi.models_pytorch.preprocessing_pytorch.preprocess_observation_pytorch', side_effect=mock_preprocess_observation_pytorch):
             # First forward pass
             print("🔄 First forward pass...")
             losses_1 = model(observation_torch, actions_torch, noise=noise_tensor, time=time_tensor)

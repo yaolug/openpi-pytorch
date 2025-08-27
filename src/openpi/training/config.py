@@ -6,7 +6,7 @@ import dataclasses
 import difflib
 import logging
 import pathlib
-from typing import Any, Protocol, TypeAlias
+from typing import Any, Protocol, TypeAlias, Literal
 
 import etils.epath as epath
 import flax.nnx as nnx
@@ -461,6 +461,14 @@ class TrainConfig:
     # A weight loader can optionally load (possibly partial) weights from disk after the model is initialized.
     weight_loader: weight_loaders.WeightLoader = dataclasses.field(default_factory=weight_loaders.NoOpWeightLoader)
 
+    # Optional path to a PyTorch checkpoint to load weights from.
+    pytorch_weight_path: str | None = None
+
+    # Precision for PyTorch training.
+    pytorch_training_precision: Literal["bfloat16", "float32"] = "bfloat16"
+    # Precision for PyTorch inference.
+    pytorch_inference_precision: Literal["bfloat16", "float32"] = "bfloat16"
+
     lr_schedule: _optimizer.LRScheduleConfig = dataclasses.field(default_factory=_optimizer.CosineDecaySchedule)
     optimizer: _optimizer.OptimizerConfig = dataclasses.field(default_factory=_optimizer.AdamW)
     ema_decay: float | None = 0.99
@@ -734,33 +742,9 @@ _CONFIGS = [
         optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
         ema_decay=0.999,
         weight_loader=weight_loaders.CheckpointWeightLoader(
-            "/home/jasonlu/.cache/openpi/openpi-assets-preview/checkpoints/pi05_base"
+            "/home/jasonlu/.cache/openpi/openpi-assets-preview/checkpoints/pi05_base/params"
         ),
-        num_train_steps=30_000,
-    ),
-    TrainConfig(
-        name="pi05_libero_pytorch",
-        model=pi0_config.Pi0Config(pi05=True, action_horizon=10, discrete_state_input=False),
-        data=LeRobotLiberoDataConfig(
-            repo_id="physical-intelligence/libero",
-            base_config=DataConfig(prompt_from_task=True),
-            extra_delta_transform=False,
-        ),
-        batch_size=256,    # 2 nodes, 16 H100s
-        lr_schedule=_optimizer.CosineDecaySchedule(
-            warmup_steps=10_000,
-            peak_lr=5e-5,
-            decay_steps=1_000_000,
-            decay_lr=5e-5,
-        ),
-        optimizer=_optimizer.AdamW(clip_gradient_norm=1000.0),
-        ema_decay=0.999,
-        #weight_loader="/path/to/pi05_libero_pytorch",
-        # weight_loader=weight_loaders.CheckpointWeightLoader(
-        #     "/home/jasonlu/.cache/openpi/openpi-assets-preview/checkpoints/pi05_base/params"
-        # ),
-        #weight_loader="/home/jasonlu/.cache/openpi/openpi-assets-preview/checkpoints/pi05_base_pytorch2",
-        weight_loader="/home/jasonlu/.cache/openpi/openpi-assets-preview/checkpoints/pi05_base_pytorch_float32",
+        pytorch_weight_path="/home/jasonlu/.cache/openpi/openpi-assets-preview/checkpoints/pi05_base_pytorch_float32",
         num_train_steps=30_000,
     ),
     #
