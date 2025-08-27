@@ -126,9 +126,10 @@ def set_seed(seed: int, local_rank: int):
 		torch.cuda.manual_seed_all(seed + local_rank)
 
 
-def build_datasets(config: _config.TrainConfig):
+def build_datasets(config: _config.TrainConfig, effective_batch_size: int | None = None):
 	# Use the unified data loader with PyTorch framework
-	data_loader = _data.create_data_loader(config, framework="pytorch", shuffle=True)
+	batch_size = effective_batch_size if effective_batch_size is not None else config.batch_size
+	data_loader = _data.create_data_loader(config, framework="pytorch", shuffle=True, batch_size_override=batch_size)
 	return data_loader, data_loader.data_config()
 
 
@@ -366,15 +367,13 @@ def train_loop(config: _config.TrainConfig, resume: bool = False, enable_gradien
 	# Build data loader using the unified data loader
 	# Calculate effective batch size per GPU for DDP
 	effective_batch_size = config.batch_size // (torch.distributed.get_world_size() if use_ddp else 1)
-	config.batch_size = effective_batch_size  # Update config for data loader
-	data_loader, data_conf = build_datasets(config)
-	loader = data_loader
-	logging.info(f"Using batch size per GPU: {effective_batch_size} (total batch size: {effective_batch_size * (torch.distributed.get_world_size() if use_ddp else 1)})")
+	logging.info(f"Using batch size per GPU: {effective_batch_size} (total batch size: {config.batch_size})")
+	data_loader, data_conf = build_datasets(config, effective_batch_size)
 
 	# Log sample images to wandb on first batch
 	if is_main and config.wandb_enabled and not resuming:
 		# Create a separate data loader for sample batch to avoid consuming the main loader
-		sample_data_loader = _data.create_data_loader(config, framework="pytorch", shuffle=False)
+		sample_data_loader = _data.create_data_loader(config, framework="pytorch", shuffle=False, batch_size_override=effective_batch_size)
 		sample_batch = next(iter(sample_data_loader))
 		# Convert observation and actions to torch tensors
 		observation, actions = sample_batch

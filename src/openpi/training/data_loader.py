@@ -228,6 +228,7 @@ def create_data_loader(
     num_batches: int | None = None,
     skip_norm_stats: bool = False,
     framework: Literal["jax", "pytorch"],
+    batch_size_override: int | None = None,
 ) -> DataLoader[tuple[_model.Observation, _model.Actions]]:
     """Create a data loader for training.
     
@@ -246,7 +247,7 @@ def create_data_loader(
         return create_rlds_data_loader(
             data_config,
             action_horizon=config.model.action_horizon,
-            batch_size=config.batch_size,
+            batch_size=batch_size_override if batch_size_override is not None else config.batch_size,
             sharding=sharding,
             shuffle=shuffle,
             num_batches=num_batches,
@@ -257,7 +258,7 @@ def create_data_loader(
         data_config,
         model_config=config.model,
         action_horizon=config.model.action_horizon,
-        batch_size=config.batch_size,
+        batch_size=batch_size_override if batch_size_override is not None else config.batch_size,
         sharding=sharding,
         shuffle=shuffle,
         num_batches=num_batches,
