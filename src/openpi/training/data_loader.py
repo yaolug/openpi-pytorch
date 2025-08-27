@@ -302,7 +302,9 @@ def create_torch_data_loader(
     dataset = create_torch_dataset(data_config, action_horizon, model_config)
     dataset = transform_dataset(dataset, data_config, skip_norm_stats=skip_norm_stats)
 
-    # Use TorchDataLoader for both frameworks with different configurations
+    # Use TorchDataLoader for both frameworks
+    # For PyTorch, batch_size is already per-GPU (calculated in train_pytorch.py)
+    # For JAX, we need to divide by process count
     local_batch_size = batch_size if framework == "pytorch" else batch_size // jax.process_count()
     data_loader = TorchDataLoader(
         dataset,

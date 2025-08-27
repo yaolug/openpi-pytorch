@@ -364,8 +364,12 @@ def train_loop(config: _config.TrainConfig, resume: bool = False, enable_gradien
 		init_wandb(config, resuming=resuming, enabled=config.wandb_enabled)
 
 	# Build data loader using the unified data loader
+	# Calculate effective batch size per GPU for DDP
+	effective_batch_size = config.batch_size // (torch.distributed.get_world_size() if use_ddp else 1)
+	config.batch_size = effective_batch_size  # Update config for data loader
 	data_loader, data_conf = build_datasets(config)
 	loader = data_loader
+	logging.info(f"Using batch size per GPU: {effective_batch_size} (total batch size: {effective_batch_size * (torch.distributed.get_world_size() if use_ddp else 1)})")
 
 	# Log sample images to wandb on first batch
 	if is_main and config.wandb_enabled and not resuming:
@@ -480,7 +484,7 @@ def train_loop(config: _config.TrainConfig, resume: bool = False, enable_gradien
 	infos = []  # Collect stats over log interval
 	if is_main:
 		logging.info(f"Running on: {platform.node()} | world_size={torch.distributed.get_world_size() if use_ddp else 1}")
-		logging.info(f"Training config: batch_size={config.batch_size}, effective_batch_size={batch_size}, num_train_steps={config.num_train_steps}")
+		logging.info(f"Training config: batch_size={config.batch_size}, effective_batch_size={effective_batch_size}, num_train_steps={config.num_train_steps}")
 		logging.info(f"Memory optimizations: gradient_checkpointing={enable_gradient_checkpointing}")
 		logging.info(f"LR schedule: warmup={warmup_steps}, peak_lr={peak_lr:.2e}, decay_steps={decay_steps}, end_lr={end_lr:.2e}")
 		logging.info(f"Optimizer: {type(config.optimizer).__name__}, weight_decay={config.optimizer.weight_decay}, clip_norm={config.optimizer.clip_gradient_norm}")
