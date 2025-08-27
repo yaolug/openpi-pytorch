@@ -1,4 +1,5 @@
 from collections.abc import Iterator, Sequence
+from typing import Literal
 import multiprocessing
 import os
 import typing
@@ -226,7 +227,7 @@ def create_data_loader(
     shuffle: bool = False,
     num_batches: int | None = None,
     skip_norm_stats: bool = False,
-    framework: str = "jax",
+    framework: Literal["jax", "pytorch"],
 ) -> DataLoader[tuple[_model.Observation, _model.Actions]]:
     """Create a data loader for training.
     
@@ -314,7 +315,7 @@ def create_torch_data_loader(
         framework=framework,
     )
 
-    return DataLoaderImpl(data_config, data_loader, framework=framework)
+    return DataLoaderImpl(data_config, data_loader)
 
 
 def create_rlds_data_loader(
@@ -356,7 +357,7 @@ def create_rlds_data_loader(
             num_batches=num_batches,
         )
 
-    return DataLoaderImpl(data_config, data_loader, framework=framework)
+    return DataLoaderImpl(data_config, data_loader)
 
 
 class TorchDataLoader:
@@ -411,12 +412,6 @@ class TorchDataLoader:
 
         generator = torch.Generator()
         generator.manual_seed(seed)
-        # Choose collate function based on framework
-        if framework == "jax":
-            collate_fn = _collate_fn_jax
-        else:
-            collate_fn = _collate_fn_pytorch
-            
         self._data_loader = torch.utils.data.DataLoader(
             typing.cast(torch.utils.data.Dataset, dataset),
             batch_size=local_batch_size,
@@ -424,7 +419,7 @@ class TorchDataLoader:
             num_workers=num_workers,
             multiprocessing_context=mp_context,
             persistent_workers=num_workers > 0,
-            collate_fn=collate_fn,
+            collate_fn=_collate_fn,
             worker_init_fn=_worker_init_fn,
             drop_last=True,
             generator=generator,
@@ -446,36 +441,16 @@ class TorchDataLoader:
                 except StopIteration:
                     break  # We've exhausted the dataset. Create a new iterator and start over.
                 num_items += 1
-                # For JAX, convert to sharded arrays; for PyTorch, return as-is
-                if hasattr(self, '_sharding') and self._sharding is not None:
+                # For JAX, convert to sharded arrays; for PyTorch, return torch tensors
+                if self._sharding is not None:
                     yield jax.tree.map(lambda x: jax.make_array_from_process_local_data(self._sharding, x), batch)
                 else:
-                    yield batch
+                    yield jax.tree.map(torch.as_tensor, batch)
 
 
-def _collate_fn_jax(items):
+def _collate_fn(items):
     """Collate function for JAX."""
-    return jax.tree.map(lambda *x: np.stack(np.asarray(x), axis=0), *items)
-
-
-def _collate_fn_pytorch(items):
-    """Collate function for PyTorch."""
-    def stack_leaf(*xs):
-        return np.stack([np.asarray(x) for x in xs], axis=0)
-
-    if not isinstance(items[0], dict):
-        import torch
-        return torch.utils.data.default_collate(items)
-    
-    def _tree_map_multi(func, batch_list):
-        # batch_list is a list of dicts with same structure; reduce by zipping leaves
-        def recurse(keys, items):
-            if isinstance(items[0], dict):
-                return {k: recurse(keys + [k], [it[k] for it in items]) for k in items[0].keys()}
-            return func(*items)
-        return recurse([], batch_list)
-    
-    return _tree_map_multi(stack_leaf, items)
+    return jax.tree.map(lambda *xs: np.stack([np.asarray(x) for x in xs], axis=0), *items)
 
 
 def _worker_init_fn(worker_id: int) -> None:
@@ -531,25 +506,13 @@ class RLDSDataLoader:
 
 
 class DataLoaderImpl(DataLoader):
-    def __init__(self, data_config: _config.DataConfig, data_loader: TorchDataLoader | RLDSDataLoader, framework: str = "jax"):
+    def __init__(self, data_config: _config.DataConfig, data_loader: TorchDataLoader | RLDSDataLoader):
         self._data_config = data_config
         self._data_loader = data_loader
-        self._framework = framework
 
     def data_config(self) -> _config.DataConfig:
         return self._data_config
 
     def __iter__(self):
         for batch in self._data_loader:
-            if self._framework == "pytorch":
-                # For PyTorch, convert to torch tensors
-                import torch
-                observation_dict = batch.copy()
-                actions = observation_dict.pop("actions")
-                # Convert numpy arrays to torch tensors
-                observation_dict = {k: torch.from_numpy(v) if hasattr(v, 'numpy') else v for k, v in observation_dict.items()}
-                actions = torch.from_numpy(actions) if hasattr(actions, 'numpy') else actions
-                yield _model.Observation.from_dict(observation_dict), actions
-            else:
-                # For JAX, return as-is (numpy arrays are now accepted by the type annotations)
-                yield _model.Observation.from_dict(batch), batch["actions"]
+            yield _model.Observation.from_dict(batch), batch["actions"]
