@@ -396,7 +396,9 @@ def train_loop(config: _config.TrainConfig, resume: bool = False, enable_gradien
 
 	# Log sample images to wandb on first batch
 	if is_main and config.wandb_enabled and not resuming:
-		sample_batch = next(iter(loader))
+		# Create a separate iterator for sample batch to avoid consuming the main loader
+		sample_loader = torch.utils.data.DataLoader(dataset, batch_size=effective_batch_size, shuffle=False, sampler=sampler, num_workers=config.num_workers, pin_memory=True, drop_last=True, collate_fn=collate_to_numpy)
+		sample_batch = next(iter(sample_loader))
 		sample_batch = batch_to_torch(sample_batch, device)
 
 		# Create sample images for wandb
@@ -413,9 +415,6 @@ def train_loop(config: _config.TrainConfig, resume: bool = False, enable_gradien
 
 		# Clear sample batch from memory
 		torch.cuda.empty_cache() if torch.cuda.is_available() else None
-
-		# Reset the loader iterator
-		loader = torch.utils.data.DataLoader(dataset, batch_size=effective_batch_size, shuffle=(sampler is None), sampler=sampler, num_workers=config.num_workers, pin_memory=True, drop_last=True, collate_fn=collate_to_numpy)
 
 	# Build model
 	if not isinstance(config.model, openpi.models.pi0_config.Pi0Config):
@@ -490,7 +489,9 @@ def train_loop(config: _config.TrainConfig, resume: bool = False, enable_gradien
 
 	def lr_schedule(step: int):
 		if step < warmup_steps:
-			return peak_lr * (step + 1) / warmup_steps
+			# Match JAX behavior: start from peak_lr / (warmup_steps + 1)
+			init_lr = peak_lr / (warmup_steps + 1)
+			return init_lr + (peak_lr - init_lr) * step / warmup_steps
 		# cosine decay
 		progress = min(1.0, (step - warmup_steps) / max(1, decay_steps - warmup_steps))
 		cos = 0.5 * (1 + np.cos(np.pi * progress))
@@ -548,7 +549,7 @@ def train_loop(config: _config.TrainConfig, resume: bool = False, enable_gradien
 					log_memory_usage(device, global_step, "after_backward")
 
 			# Gradient clipping
-			torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=config.optimizer.clip_gradient_norm)
+			grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=config.optimizer.clip_gradient_norm)
 
 			# Optimizer step
 			optim.step()
@@ -577,6 +578,7 @@ def train_loop(config: _config.TrainConfig, resume: bool = False, enable_gradien
 				infos.append({
 					"loss": loss.item(),
 					"learning_rate": optim.param_groups[0]['lr'],
+					"grad_norm": float(grad_norm) if isinstance(grad_norm, torch.Tensor) else grad_norm,
 				})
 
 			if is_main and (global_step % config.log_interval == 0):
@@ -586,16 +588,24 @@ def train_loop(config: _config.TrainConfig, resume: bool = False, enable_gradien
 				avg_loss = sum(info["loss"] for info in infos) / len(infos)
 				avg_lr = sum(info["learning_rate"] for info in infos) / len(infos)
 
-				logging.info(f"step={global_step} loss={avg_loss:.4f} lr={avg_lr:.2e} time={elapsed:.1f}s")
+				avg_grad_norm = None
+				if any('grad_norm' in info for info in infos):
+					vals = [info['grad_norm'] for info in infos if 'grad_norm' in info and info['grad_norm'] is not None]
+					if len(vals) > 0:
+						avg_grad_norm = sum(vals) / len(vals)
+				logging.info(f"step={global_step} loss={avg_loss:.4f} lr={avg_lr:.2e} grad_norm={avg_grad_norm:.2f} time={elapsed:.1f}s" if avg_grad_norm is not None else f"step={global_step} loss={avg_loss:.4f} lr={avg_lr:.2e} time={elapsed:.1f}s")
 
 				# Log to wandb
-				if config.wandb_enabled and len(infos) > 1:
-					wandb.log({
+				if config.wandb_enabled and len(infos) > 0:
+					log_payload = {
 						"loss": avg_loss,
 						"learning_rate": avg_lr,
 						"step": global_step,
 						"time_per_step": elapsed / config.log_interval,
-					}, step=global_step)
+					}
+					if avg_grad_norm is not None:
+						log_payload["grad_norm"] = avg_grad_norm
+					wandb.log(log_payload, step=global_step)
 
 				start_time = time.time()
 				infos = []  # Reset stats collection

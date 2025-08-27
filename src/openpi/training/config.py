@@ -379,7 +379,7 @@ class RLDSDroidDataConfig(DataConfigFactory):
         )
 
         data_transforms = _transforms.Group(
-            inputs=[droid_policy.DroidInputs(action_dim=model_config.action_dim, model_type=model_config.model_type)],
+            inputs=[droid_policy.DroidInputs(model_type=model_config.model_type)],
             outputs=[droid_policy.DroidOutputs()],
         )
 
@@ -734,7 +734,7 @@ _CONFIGS = [
         optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
         ema_decay=0.999,
         weight_loader=weight_loaders.CheckpointWeightLoader(
-            "gs://openpi-assets-preview/checkpoints/pi05_may21_280k_v1/params"
+            "/home/jasonlu/.cache/openpi/openpi-assets-preview/checkpoints/pi05_base"
         ),
         num_train_steps=30_000,
     ),
@@ -746,19 +746,22 @@ _CONFIGS = [
             base_config=DataConfig(prompt_from_task=True),
             extra_delta_transform=False,
         ),
-        #batch_size=1024,    # 2 nodes, 16 H100s
-        batch_size=64,
+        batch_size=256,    # 2 nodes, 16 H100s
         lr_schedule=_optimizer.CosineDecaySchedule(
-            warmup_steps=2_500,
-            peak_lr=1e-4,
+            warmup_steps=10_000,
+            peak_lr=5e-5,
             decay_steps=1_000_000,
-            decay_lr=1e-4,
+            decay_lr=5e-5,
         ),
-        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1000.0),
         ema_decay=0.999,
         #weight_loader="/path/to/pi05_libero_pytorch",
-        weight_loader="/home/jasonlu/.cache/openpi/openpi-assets-preview/checkpoints/pi05_base_pytorch2",
-        num_train_steps=6_500,
+        # weight_loader=weight_loaders.CheckpointWeightLoader(
+        #     "/home/jasonlu/.cache/openpi/openpi-assets-preview/checkpoints/pi05_base/params"
+        # ),
+        #weight_loader="/home/jasonlu/.cache/openpi/openpi-assets-preview/checkpoints/pi05_base_pytorch2",
+        weight_loader="/home/jasonlu/.cache/openpi/openpi-assets-preview/checkpoints/pi05_base_pytorch_float32",
+        num_train_steps=30_000,
     ),
     #
     # Fine-tuning Aloha configs.
@@ -857,6 +860,76 @@ _CONFIGS = [
         log_interval=100,
         save_interval=5000,
         keep_period=20_000,
+        num_workers=0,  # Important: RLDS DataLoader requires num_workers=0, handles multi-processing internally
+    ),
+    TrainConfig(
+        # This config is for fine-tuning pi05 on the *full* DROID dataset.
+        # We use RLDS data loading to make training on this large dataset tractable.
+        # For fine-tuning on your own DROID dataset, see below.
+        name="pi05_full_droid_finetune",
+        model=pi0_config.Pi0Config(
+            pi05=True,
+            action_dim=32,
+            action_horizon=16,
+        ),
+        data=RLDSDroidDataConfig(
+            repo_id="droid",
+            # Set this to the path to your DROID RLDS dataset (the parent directory of the `droid` directory).
+            rlds_data_dir="/mnt/pi-data/kevin",
+            action_space=droid_rlds_dataset.DroidActionSpace.JOINT_POSITION,
+            assets=AssetsConfig(
+                assets_dir="gs://openpi-assets-preview/checkpoints/pi05_may21_280k_v1/assets/",
+                asset_id="droid",
+            ),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader(
+            "gs://openpi-assets-preview/checkpoints/pi05_may21_280k_v1/params"
+        ),
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=1_000,
+            peak_lr=5e-5,
+            decay_steps=1_000_000,
+            decay_lr=5e-5,
+        ),
+        num_train_steps=100_000,
+        batch_size=256,
+        log_interval=100,
+        save_interval=5000,
+        keep_period=10_000,
+        num_workers=0,  # Important: RLDS DataLoader requires num_workers=0, handles multi-processing internally
+    ),
+    TrainConfig(
+        # This config is for fine-tuning pi05 on the *full* DROID dataset.
+        # We use RLDS data loading to make training on this large dataset tractable.
+        # For fine-tuning on your own DROID dataset, see below.
+        name="pi05_full_droid_finetune_pytorch",
+        model=pi0_config.Pi0Config(
+            pi05=True,
+            action_dim=32,
+            action_horizon=16,
+        ),
+        data=RLDSDroidDataConfig(
+            repo_id="droid",
+            # Set this to the path to your DROID RLDS dataset (the parent directory of the `droid` directory).
+            rlds_data_dir="/mnt/pi-data/kevin",
+            action_space=droid_rlds_dataset.DroidActionSpace.JOINT_POSITION,
+            assets=AssetsConfig(
+                assets_dir="gs://openpi-assets-preview/checkpoints/pi05_may21_280k_v1/assets/",
+                asset_id="droid",
+            ),
+        ),
+        weight_loader='/home/jasonlu/.cache/openpi/openpi-assets-preview/checkpoints/pi05_base_pytorch2',
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=1_000,
+            peak_lr=5e-5,
+            decay_steps=1_000_000,
+            decay_lr=5e-5,
+        ),
+        num_train_steps=100_000,
+        batch_size=256,
+        log_interval=100,
+        save_interval=5000,
+        keep_period=10_000,
         num_workers=0,  # Important: RLDS DataLoader requires num_workers=0, handles multi-processing internally
     ),
     TrainConfig(

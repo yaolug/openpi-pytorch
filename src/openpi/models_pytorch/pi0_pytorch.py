@@ -44,9 +44,11 @@ def create_sinusoidal_pos_embedding(
 
 
 def sample_beta(alpha, beta, bsize, device):
-    gamma1 = torch.empty((bsize,), device=device).uniform_(0, 1).pow(1 / alpha)
-    gamma2 = torch.empty((bsize,), device=device).uniform_(0, 1).pow(1 / beta)
-    return gamma1 / (gamma1 + gamma2)
+    alpha_t = torch.as_tensor(alpha, dtype=torch.float32, device=device)
+    beta_t = torch.as_tensor(beta, dtype=torch.float32, device=device)
+    dist = torch.distributions.Beta(alpha_t, beta_t)
+    samples = dist.sample((bsize,))
+    return samples
 
 
 def make_att_2d_masks(pad_masks, att_masks):
@@ -318,7 +320,7 @@ class PI0Pytorch(nn.Module):
 
         prefix_embs, prefix_pad_masks, prefix_att_masks = self.embed_prefix(images, img_masks, lang_tokens, lang_masks)
         suffix_embs, suffix_pad_masks, suffix_att_masks, adarms_cond = self.embed_suffix(state, x_t, time)
-        suffix_embs = suffix_embs.to(dtype=torch.bfloat16)
+        #suffix_embs = suffix_embs.to(dtype=torch.bfloat16)
 
         pad_masks = torch.cat([prefix_pad_masks, suffix_pad_masks], dim=1)
         att_masks = torch.cat([prefix_att_masks, suffix_att_masks], dim=1)

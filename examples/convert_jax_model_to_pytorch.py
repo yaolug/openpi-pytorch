@@ -338,8 +338,12 @@ def slice_initial_orbax_checkpoint(checkpoint_dir: str, restore_precision: str |
     }
     restore_dtype = dtype_map.get(restore_precision) if restore_precision else None
 
+    # Use CPU sharding to avoid GPU memory issues during checkpoint loading
+    cpu_device = jax.devices('cpu')[0]
+    cpu_sharding = jax.sharding.SingleDeviceSharding(cpu_device)
+    
     # Use repository restore utility to load a pure dict of params (value suffix removed)
-    params = openpi.models.model.restore_params(params_dir, restore_type=jax.Array, dtype=restore_dtype)
+    params = openpi.models.model.restore_params(params_dir, restore_type=jax.Array, dtype=restore_dtype, sharding=cpu_sharding)
 
     # get params for PaliGemma
     pali_params = params["PaliGemma"]
@@ -384,7 +388,8 @@ def load_jax_model_and_print_keys(checkpoint_dir: str):
                 return
         
         item = {params_name: metadata[params_name]}
-        device = jax.local_devices()[0]
+        # Use CPU device to avoid GPU memory issues
+        device = jax.devices('cpu')[0]
         sharding = jax.sharding.SingleDeviceSharding(device)
         
         restored = checkpointer.restore(
@@ -539,7 +544,7 @@ def convert_pi0_checkpoint(checkpoint_dir: str, precision: str, output_path: str
             pi05=True,
         )
     elif "pi05_base" in checkpoint_dir:
-        pi0_config = Pi0Config(
+        pi0_config = openpi.models.pi0_config.Pi0Config(
             action_dim=32,
             action_horizon=50,
             pi05=True,
@@ -563,7 +568,7 @@ def convert_pi0_checkpoint(checkpoint_dir: str, precision: str, output_path: str
         print(f"Warning: Could not load all parameters: {e}")
         print("Continuing with partial load...")
     
-    pi0_model = pi0_model.to(torch.bfloat16)
+    pi0_model = pi0_model.to(torch.float32)
 
     # Save the converted model using safetensors
     os.makedirs(output_path, exist_ok=True)
