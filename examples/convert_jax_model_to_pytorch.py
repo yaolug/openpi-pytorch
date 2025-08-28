@@ -8,10 +8,12 @@ This script loads a JAX model checkpoint using orbax and can either:
 
 Usage:
     # Just inspect keys:
-    python convert_jax_model_to_pytorch.py --checkpoint_dir /path/to/checkpoint --inspect_only
+    python examples/convert_jax_model_to_pytorch.py --checkpoint_dir /path/to/checkpoint --inspect_only
+    python examples/convert_jax_model_to_pytorch.py --checkpoint_dir /path/to/checkpoint --inspect_only
     
     # Convert to PyTorch:
-    python convert_jax_model_to_pytorch.py --checkpoint_dir /path/to/checkpoint --output_path /path/to/output
+    python examples/convert_jax_model_to_pytorch.py --checkpoint_dir /path/to/checkpoint --output_path /path/to/output
+    python examples/convert_jax_model_to_pytorch.py --checkpoint_dir /path/to/checkpoint --output_path /path/to/output
 
 Example:    
     # pi0_droid 
@@ -336,8 +338,12 @@ def slice_initial_orbax_checkpoint(checkpoint_dir: str, restore_precision: str |
     }
     restore_dtype = dtype_map.get(restore_precision) if restore_precision else None
 
+    # Use CPU sharding to avoid GPU memory issues during checkpoint loading
+    cpu_device = jax.devices('cpu')[0]
+    cpu_sharding = jax.sharding.SingleDeviceSharding(cpu_device)
+    
     # Use repository restore utility to load a pure dict of params (value suffix removed)
-    params = openpi.models.model.restore_params(params_dir, restore_type=jax.Array, dtype=restore_dtype)
+    params = openpi.models.model.restore_params(params_dir, restore_type=jax.Array, dtype=restore_dtype, sharding=cpu_sharding)
 
     # get params for PaliGemma
     pali_params = params["PaliGemma"]
@@ -382,7 +388,8 @@ def load_jax_model_and_print_keys(checkpoint_dir: str):
                 return
         
         item = {params_name: metadata[params_name]}
-        device = jax.local_devices()[0]
+        # Use CPU device to avoid GPU memory issues
+        device = jax.devices('cpu')[0]
         sharding = jax.sharding.SingleDeviceSharding(device)
         
         restored = checkpointer.restore(
@@ -536,6 +543,12 @@ def convert_pi0_checkpoint(checkpoint_dir: str, precision: str, output_path: str
             action_horizon=10,
             pi05=True,
         )
+    elif "pi05_base" in checkpoint_dir:
+        pi0_config = openpi.models.pi0_config.Pi0Config(
+            action_dim=32,
+            action_horizon=50,
+            pi05=True,
+        )
     else:
         pi0_config = openpi.models.pi0_config.Pi0Config(
             action_dim=8,
@@ -549,13 +562,14 @@ def convert_pi0_checkpoint(checkpoint_dir: str, precision: str, output_path: str
     all_params = {**paligemma_params, **gemma_params, **projection_params}
     
     # Load state dict
-    try:
-        pi0_model.load_state_dict(all_params)
-    except Exception as e:
-        print(f"Warning: Could not load all parameters: {e}")
-        print("Continuing with partial load...")
+    pi0_model.load_state_dict(all_params, strict=False)
     
-    pi0_model = pi0_model.to(torch.bfloat16)
+    if precision == "float32":
+        pi0_model = pi0_model.to(torch.float32)
+    elif precision == "bfloat16":
+        pi0_model = pi0_model.to(torch.bfloat16)
+    else:
+        raise ValueError(f"Invalid precision: {precision}")
 
     # Save the converted model using safetensors
     os.makedirs(output_path, exist_ok=True)
@@ -602,7 +616,7 @@ def main():
     parser.add_argument(
         "--precision",
         choices=["float32", "bfloat16", "float16"],
-        default="float32",
+        default="bfloat16",
         type=str,
         help="Precision for model conversion"
     )

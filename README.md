@@ -185,10 +185,10 @@ We provide more examples for how to fine-tune and run inference with our models 
 openpi now provides PyTorch implementations of π₀ and π₀.₅ models alongside the original JAX versions (π₀-FAST is not currently supported in PyTorch). The PyTorch models offer greater deployment flexibility and seamless integration with PyTorch-based ML stacks, while maintaining feature parity with their JAX counterparts.
 
 ### Setup
-1. Upgrade the transformers library to 4.53.2
+1. Upgrade the transformers library to 4.53.2 and torch to 2.7.1
    - The required version is already specified in pyproject.toml
-   - If you set up your environment previously, reinstall it to ensure you have transformers 4.53.2
-   - You can verify the version with `pip show transformers`
+   - If you set up your environment previously, reinstall it to ensure you have transformers 4.53.2 and torch 2.7.1
+   - You can verify the version with `uv pip show transformers` and `uv pip show torch`
 
 2. Apply the transformers library patches
    ```bash
@@ -234,6 +234,73 @@ uv run scripts/serve_policy.py policy:checkpoint \
     --policy.config=pi05_droid \
     --policy.dir=/path/to/converted/pytorch/checkpoint
 ```
+
+### Finetuning with PyTorch
+
+To finetune a model in PyTorch:
+
+1. Convert the JAX base model to PyTorch format:
+   ```bash
+   python examples/convert_jax_model_to_pytorch.py \
+       --checkpoint_dir /path/to/jax/base/model \
+       --output_path /path/to/pytorch/base/model
+   ```
+
+2. Specify the converted PyTorch model path in your config using `pytorch_weight_path`
+
+3. Launch training using one of these modes:
+
+```bash
+# Single GPU training:
+uv run scripts/train_pytorch.py <config_name> --exp_name <run_name> --save_interval <interval>
+
+# Example:
+uv run scripts/train_pytorch.py debug --exp_name pytorch_test
+uv run scripts/train_pytorch.py debug --exp_name pytorch_test --resume  # Resume from latest checkpoint
+
+# Multi-GPU training (single node):
+torchrun --standalone --nnodes=1 --nproc_per_node=<num_gpus> scripts/train_pytorch.py <config_name> --exp_name <run_name>
+
+# Example:
+torchrun --standalone --nnodes=1 --nproc_per_node=2 scripts/train_pytorch.py pi0_aloha_sim --exp_name pytorch_ddp_test
+torchrun --standalone --nnodes=1 --nproc_per_node=2 scripts/train_pytorch.py pi0_aloha_sim --exp_name pytorch_ddp_test --resume
+
+# Multi-Node Training:
+torchrun \
+    --nnodes=<num_nodes> \
+    --nproc_per_node=<gpus_per_node> \
+    --node_rank=<rank_of_node> \
+    --master_addr=<master_ip> \
+    --master_port=<port> \
+    scripts/train_pytorch.py <config_name> --exp_name=<run_name> --save_interval <interval>
+```
+
+### Precision Settings
+
+JAX and PyTorch implementations handle precision as follows:
+
+**JAX:**
+1. Inference: weights and activations are bfloat16 except for selected layers in float32
+2. Training: weights and gradients are float32, activations are bfloat16
+
+**PyTorch:**
+1. Inference: matches JAX - weights and activations are bfloat16 except for selected layers in float32
+2. Training: supports either all float32 or the same mixed precision as inference (default) You can change it by setting `pytorch_training_precision` in the config. Per GPU batch size can be 64 with mixed precision but 16 with float32 on a 80GB memory A100 or H100. Further optimizations to reduce memory consumption can be done in the future.
+
+### Validation Results
+
+We have validated the PyTorch implementation against JAX:
+
+1. Converting a JAX-finetuned pi05_libero model (bfloat16 precision) to PyTorch and evaluate:
+   - JAX checkpoint: 92.0% on Libero-10
+   - Converted PyTorch checkpoint: 92.2% on Libero-10
+
+2. Finetuning pi05_libero from pi05_base model in PyTorch:
+   - Using float32: (convert JAX ckpt to pytorch in float32) Loss curves match JAX throughout training
+   - Using bfloat16: (convert JAX ckpt to pytorch in bfloat16) Loss curves match after 10k steps (in 30k total steps)
+   - Final performance: 91.4% on Libero-10
+
+3. We comapred inference speed between JAX and PyTorch and they are comparable.
 
 ## Troubleshooting
 

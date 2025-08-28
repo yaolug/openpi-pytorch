@@ -4,7 +4,7 @@ import dataclasses
 import enum
 import logging
 import pathlib
-from typing import Generic, TypeVar
+from typing import Generic, TypeVar, Union
 
 import augmax
 from flax import nnx
@@ -24,7 +24,8 @@ import openpi.shared.array_typing as at
 
 logger = logging.getLogger("openpi")
 
-ArrayT = TypeVar("ArrayT", at.Array, jax.ShapeDtypeStruct)
+# Type variable for array types (JAX arrays, PyTorch tensors, or numpy arrays)
+ArrayT = TypeVar("ArrayT", bound=Union[jax.Array, torch.Tensor, np.ndarray])
 
 
 class ModelType(enum.Enum):
