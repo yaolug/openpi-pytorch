@@ -191,38 +191,79 @@ def save_checkpoint(model, optimizer, global_step, config, is_main, ema_model=No
 
 
 def load_checkpoint(model, optimizer, checkpoint_dir, device, ema_model=None):
-	"""Load the latest checkpoint and return the global step."""
-	checkpoint_steps = []
-	for d in checkpoint_dir.iterdir():
-		if d.is_dir() and d.name.isdigit():
-			checkpoint_steps.append(int(d.name))
-	
-	if not checkpoint_steps:
-		raise FileNotFoundError(f"No checkpoints found in {checkpoint_dir}")
-	
-	latest_step = max(checkpoint_steps)
-	ckpt_dir = checkpoint_dir / f"{latest_step}"
-	
-	# Load model state with error handling
-	model_state_dict = torch.load(ckpt_dir / "pytorch_model.pt", map_location=device, weights_only=False)
-	(model.module if isinstance(model, torch.nn.parallel.DistributedDataParallel) else model).load_state_dict(model_state_dict)
-	logging.info(f"Successfully loaded model state from step {latest_step}")
-	
-	# Load optimizer state with error handling and fallback
-	optimizer_state_dict = torch.load(ckpt_dir / "optimizer.pt", map_location=device, weights_only=False)
-	optimizer.load_state_dict(optimizer_state_dict)
-	
-	# Load EMA state if available
-	if ema_model is not None and (ckpt_dir / "ema_model.pt").exists():
-		ema_state_dict = torch.load(ckpt_dir / "ema_model.pt", map_location=device, weights_only=False)
-		ema_model.load_state_dict(ema_state_dict)
-		logging.info(f"Successfully loaded EMA state from step {latest_step}")
-	
-	# Load metadata (weights_only=False needed for older checkpoints that might contain JAX/Flax objects)
-	metadata = torch.load(ckpt_dir / "metadata.pt", map_location=device, weights_only=False)
-	global_step = metadata.get("global_step", latest_step)
-	logging.info(f"Successfully loaded metadata from step {latest_step}")
-	return global_step
+    """Load the latest checkpoint and return the global step."""
+    checkpoint_steps = []
+    for d in checkpoint_dir.iterdir():
+        if d.is_dir() and d.name.isdigit():
+            checkpoint_steps.append(int(d.name))
+    
+    if not checkpoint_steps:
+        raise FileNotFoundError(f"No checkpoints found in {checkpoint_dir}")
+    
+    latest_step = max(checkpoint_steps)
+    ckpt_dir = checkpoint_dir / f"{latest_step}"
+    
+    # Clear memory before loading checkpoints
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        gc.collect()
+        log_memory_usage(device, latest_step, "before_loading_checkpoint")
+
+    try:
+        # Load model state with error handling
+        logging.info("Loading model state...")
+        model_state_dict = torch.load(ckpt_dir / "pytorch_model.pt", map_location=device, weights_only=False)
+        (model.module if isinstance(model, torch.nn.parallel.DistributedDataParallel) else model).load_state_dict(model_state_dict)
+        del model_state_dict
+        torch.cuda.empty_cache()
+        gc.collect()
+        log_memory_usage(device, latest_step, "after_loading_model")
+        
+        # Load optimizer state with error handling
+        logging.info("Loading optimizer state...")
+        optimizer_state_dict = torch.load(ckpt_dir / "optimizer.pt", map_location=device, weights_only=False)
+        optimizer.load_state_dict(optimizer_state_dict)
+        del optimizer_state_dict
+        torch.cuda.empty_cache()
+        gc.collect()
+        log_memory_usage(device, latest_step, "after_loading_optimizer")
+        
+        # Load EMA state if available
+        if ema_model is not None and (ckpt_dir / "ema_model.pt").exists():
+            logging.info("Loading EMA state...")
+            # Clear as much memory as possible before loading EMA
+            torch.cuda.empty_cache()
+            gc.collect()
+            
+            ema_state_dict = torch.load(ckpt_dir / "ema_model.pt", map_location=device, weights_only=False)
+            ema_model.load_state_dict(ema_state_dict)
+            del ema_state_dict
+            torch.cuda.empty_cache()
+            gc.collect()
+            log_memory_usage(device, latest_step, "after_loading_ema")
+            logging.info(f"Successfully loaded EMA state from step {latest_step}")
+        
+        # Load metadata
+        logging.info("Loading metadata...")
+        metadata = torch.load(ckpt_dir / "metadata.pt", map_location=device, weights_only=False)
+        global_step = metadata.get("global_step", latest_step)
+        del metadata
+        torch.cuda.empty_cache()
+        gc.collect()
+        log_memory_usage(device, latest_step, "after_loading_metadata")
+        
+        logging.info(f"Successfully loaded all checkpoint components from step {latest_step}")
+        return global_step
+        
+    except RuntimeError as e:
+        if "out of memory" in str(e):
+            # Clear memory and provide detailed error message
+            torch.cuda.empty_cache()
+            gc.collect()
+            logging.error(f"Out of memory error while loading checkpoint: {str(e)}")
+            log_memory_usage(device, latest_step, "after_oom_error")
+            raise RuntimeError(f"Out of memory while loading checkpoint. Try setting PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True") from e
+        raise
 
 
 def get_latest_checkpoint_step(checkpoint_dir):
@@ -347,6 +388,8 @@ def train_loop(config: _config.TrainConfig):
 		)
 	else:
 		model_cfg = config.model
+		# Update dtype to match pytorch_training_precision
+		object.__setattr__(model_cfg, "dtype", config.pytorch_training_precision)
 
 	model = openpi.models_pytorch.pi0_pytorch.PI0Pytorch(model_cfg).to(device)
 	
@@ -427,6 +470,7 @@ def train_loop(config: _config.TrainConfig):
 		logging.info(f"Memory optimizations: gradient_checkpointing={enable_gradient_checkpointing}")
 		logging.info(f"LR schedule: warmup={warmup_steps}, peak_lr={peak_lr:.2e}, decay_steps={decay_steps}, end_lr={end_lr:.2e}")
 		logging.info(f"Optimizer: {type(config.optimizer).__name__}, weight_decay={config.optimizer.weight_decay}, clip_norm={config.optimizer.clip_gradient_norm}")
+		logging.info(f"Training precision: {model_cfg.dtype}")
 		if config.ema_decay is not None:
 			logging.info(f"EMA decay: {config.ema_decay}")
 

@@ -730,7 +730,7 @@ _CONFIGS = [
             base_config=DataConfig(prompt_from_task=True),
             extra_delta_transform=False,
         ),
-        batch_size=256,
+        batch_size=16,
         lr_schedule=_optimizer.CosineDecaySchedule(
             warmup_steps=10_000,
             peak_lr=5e-5,
@@ -743,6 +743,7 @@ _CONFIGS = [
             "/home/jasonlu/.cache/openpi/openpi-assets-preview/checkpoints/pi05_base/params"
         ),
         pytorch_weight_path="/home/jasonlu/.cache/openpi/openpi-assets-preview/checkpoints/pi05_base_pytorch_float32",
+        pytorch_training_precision="float32",
         num_train_steps=30_000,
     ),
     #

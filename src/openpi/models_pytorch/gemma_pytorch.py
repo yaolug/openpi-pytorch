@@ -49,13 +49,14 @@ class PaliGemmaWithExpertModel(nn.Module):
         self.gemma_expert = GemmaForCausalLM(config=action_expert_config_hf)
         self.gemma_expert.model.embed_tokens = None
 
-        self.to_bfloat16_for_selected_params()
+        self.to_bfloat16_for_selected_params(precision)
 
     def to_bfloat16_for_selected_params(self, precision: Literal["bfloat16", "float32"] = "bfloat16"):
         if precision == "bfloat16":
             self = self.to(dtype=torch.bfloat16)
         elif precision == "float32":
             self = self.to(dtype=torch.float32)
+            return
         else:
             raise ValueError(f"Invalid precision: {precision}")
 
