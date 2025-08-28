@@ -285,7 +285,7 @@ JAX and PyTorch implementations handle precision as follows:
 
 **PyTorch:**
 1. Inference: matches JAX - weights and activations are bfloat16 except for selected layers in float32
-2. Training: supports either all float32 or the same mixed precision as inference (default)
+2. Training: supports either all float32 or the same mixed precision as inference (default) You can change it by setting `pytorch_training_precision` in the config
 
 ### Validation Results
 

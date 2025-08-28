@@ -562,11 +562,7 @@ def convert_pi0_checkpoint(checkpoint_dir: str, precision: str, output_path: str
     all_params = {**paligemma_params, **gemma_params, **projection_params}
     
     # Load state dict
-    try:
-        pi0_model.load_state_dict(all_params)
-    except Exception as e:
-        print(f"Warning: Could not load all parameters: {e}")
-        print("Continuing with partial load...")
+    pi0_model.load_state_dict(all_params, strict=False)
     
     if precision == "float32":
         pi0_model = pi0_model.to(torch.float32)

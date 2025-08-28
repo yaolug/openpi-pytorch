@@ -132,9 +132,6 @@ def build_datasets(config: _config.TrainConfig):
 	return data_loader, data_loader.data_config()
 
 
-
-
-
 def batch_to_torch(batch: Dict[str, Any], device: torch.device) -> Dict[str, Any]:
 	# Memory-efficient conversion: convert to torch tensors and move to device in one step
 	batch = jax.tree.map(lambda x: torch.from_numpy(np.array(x)).to(device), batch)
@@ -238,70 +235,6 @@ def get_latest_checkpoint_step(checkpoint_dir):
 	return max(checkpoint_steps) if checkpoint_steps else None
 
 
-def validate_checkpoint_integrity(checkpoint_dir, step):
-	"""Validate that a checkpoint at the given step is complete and uncorrupted."""
-	ckpt_dir = checkpoint_dir / f"{step}"
-	
-	required_files = ["pytorch_model.pt", "optimizer.pt", "metadata.pt"]
-	optional_files = ["ema_model.pt"]
-	
-	# Check if all required files exist
-	for file_name in required_files:
-		file_path = ckpt_dir / file_name
-		if not file_path.exists():
-			logging.warning(f"Required checkpoint file missing: {file_path}")
-			return False
-	
-	# Try to validate file integrity by attempting to load them
-	try:
-		# Test model file
-		device = torch.device("cpu")  # Use CPU for validation to avoid GPU memory issues
-		model_state = torch.load(ckpt_dir / "pytorch_model.pt", map_location=device, weights_only=False)
-		if not isinstance(model_state, dict):
-			logging.warning(f"Model checkpoint file corrupted at step {step}")
-			return False
-		
-		# Test optimizer file
-		optimizer_state = torch.load(ckpt_dir / "optimizer.pt", map_location=device, weights_only=False)
-		if not isinstance(optimizer_state, dict):
-			logging.warning(f"Optimizer checkpoint file corrupted at step {step}")
-			return False
-		
-		# Test metadata file
-		metadata = torch.load(ckpt_dir / "metadata.pt", map_location=device, weights_only=False)
-		if not isinstance(metadata, dict) or "global_step" not in metadata:
-			logging.warning(f"Metadata checkpoint file corrupted at step {step}")
-			return False
-		
-		logging.info(f"Checkpoint at step {step} validated successfully")
-		return True
-		
-	except Exception as e:
-		logging.warning(f"Checkpoint validation failed at step {step}: {e}")
-		return False
-
-
-def find_latest_valid_checkpoint(checkpoint_dir):
-	"""Find the latest checkpoint that passes integrity validation."""
-	checkpoint_steps = []
-	for d in checkpoint_dir.iterdir():
-		if d.is_dir() and d.name.isdigit():
-			checkpoint_steps.append(int(d.name))
-	
-	if not checkpoint_steps:
-		return None
-	
-	# Sort steps in descending order to check latest first
-	checkpoint_steps.sort(reverse=True)
-	
-	for step in checkpoint_steps:
-		if validate_checkpoint_integrity(checkpoint_dir, step):
-			return step
-	
-	logging.error("No valid checkpoints found in directory")
-	return None
-
-
 def log_memory_usage(device, step, phase="unknown"):
 	"""Log detailed memory usage information."""
 	if not torch.cuda.is_available():
@@ -337,7 +270,7 @@ def train_loop(config: _config.TrainConfig):
 		exp_checkpoint_dir = config.checkpoint_dir
 		if exp_checkpoint_dir.exists():
 			# Use validation to find the latest working checkpoint
-			latest_step = find_latest_valid_checkpoint(exp_checkpoint_dir)
+			latest_step = get_latest_checkpoint_step(exp_checkpoint_dir)
 			if latest_step is not None:
 				resuming = True
 				logging.info(f"Resuming from experiment checkpoint directory: {exp_checkpoint_dir} at step {latest_step}")
