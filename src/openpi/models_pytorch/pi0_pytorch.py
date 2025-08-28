@@ -111,6 +111,12 @@ class PI0Pytorch(nn.Module):
         
         # Initialize gradient checkpointing flag
         self.gradient_checkpointing_enabled = False
+        try:
+            from transformers.models.siglip import check
+            if not check.check_whether_transformers_replace_is_installed_correctly():
+                raise ValueError("TransformersReplace is not installed correctly. Please install it with `uv pip install transformers==4.53.2` and `cp -r ./src/openpi/models_pytorch/transformers_replace/* .venv/lib/python3.11/site-packages/transformers/`.")
+        except ImportError:
+            raise ValueError("TransformersReplace is not installed correctly. Please install it with `uv pip install transformers==4.53.2` and `cp -r ./src/openpi/models_pytorch/transformers_replace/* .venv/lib/python3.11/site-packages/transformers/`.")
 
     def gradient_checkpointing_enable(self):
         """Enable gradient checkpointing for memory optimization."""
