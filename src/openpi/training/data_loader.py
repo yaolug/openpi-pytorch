@@ -473,7 +473,9 @@ class TorchDataLoader:
 
 
 def _collate_fn(items):
-    """Collate function for JAX."""
+    """Collate the batch elements into batched numpy arrays."""
+    # Make sure to convert to numpy arrays before stacking since some of the incoming elements
+    # may be JAX arrays.
     return jax.tree.map(lambda *xs: np.stack([np.asarray(x) for x in xs], axis=0), *items)
 
 
