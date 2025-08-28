@@ -187,24 +187,15 @@ class Pi0(_model.BaseModel):
 
     @override
     def compute_loss(
-        self, 
-        rng: at.KeyArrayLike, 
-        observation: _model.Observation, 
-        actions: _model.Actions, 
-        *, 
-        train: bool = False,
-        noise: at.Float[at.Array, "*b ah ad"] | None = None,
-        time: at.Float[at.Array, "*b"] | None = None
+        self, rng: at.KeyArrayLike, observation: _model.Observation, actions: _model.Actions, *, train: bool = False
     ) -> at.Float[at.Array, "*b ah"]:
         preprocess_rng, noise_rng, time_rng = jax.random.split(rng, 3)
         observation = _model.preprocess_observation(preprocess_rng, observation, train=train)
 
         batch_shape = actions.shape[:-2]
         # Use provided noise and time if available, otherwise generate them
-        if noise is None:
-            noise = jax.random.normal(noise_rng, actions.shape)
-        if time is None:
-            time = jax.random.beta(time_rng, 1.5, 1, batch_shape) * 0.999 + 0.001
+        noise = jax.random.normal(noise_rng, actions.shape)
+        time = jax.random.beta(time_rng, 1.5, 1, batch_shape) * 0.999 + 0.001
         time_expanded = time[..., None, None]
         x_t = time_expanded * noise + (1 - time_expanded) * actions
         u_t = noise - actions
@@ -221,7 +212,7 @@ class Pi0(_model.BaseModel):
         )
         v_t = self.action_out_proj(suffix_out[:, -self.action_horizon :])
 
-        return jnp.square(v_t - u_t)
+        return jnp.mean(jnp.square(v_t - u_t), axis=-1)
 
     @override
     def sample_actions(
