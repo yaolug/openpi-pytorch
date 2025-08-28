@@ -307,20 +307,16 @@ def create_torch_data_loader(
     # For JAX, divide by process count
     sampler = None
     if framework == "pytorch":
-        try:
-            import torch.distributed as dist
-            if dist.is_initialized():
-                sampler = torch.utils.data.distributed.DistributedSampler(
-                    dataset,
-                    num_replicas=dist.get_world_size(),
-                    rank=dist.get_rank(),
-                    shuffle=shuffle,
-                    drop_last=True,
-                )
-                local_batch_size = batch_size // dist.get_world_size()
-            else:
-                local_batch_size = batch_size
-        except ImportError:
+        if torch.distributed.is_initialized():
+            sampler = torch.utils.data.distributed.DistributedSampler(
+                dataset,
+                num_replicas=torch.distributed.get_world_size(),
+                rank=torch.distributed.get_rank(),
+                shuffle=shuffle,
+                drop_last=True,
+            )
+            local_batch_size = batch_size // torch.distributed.get_world_size()
+        else:
             local_batch_size = batch_size
     else:
         local_batch_size = batch_size // jax.process_count()
